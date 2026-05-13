@@ -34,6 +34,8 @@ class DatasetConfig:
     single_cls: bool = False
 
     def __post_init__(self) -> None:
+        if self.train_path is None:
+            raise ValueError("dataset.train_path 不可为空，请在配置文件中指定训练集路径")
         if self.num_classes <= 0:
             raise ValueError("num_classes 必须大于 0")
         if self.image_size <= 0:

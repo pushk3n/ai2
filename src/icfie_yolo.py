@@ -132,12 +132,16 @@ class ICFIEYOLO(nn.Module):
         #   2. backbone_neck / detect_head 已切换到 eval 模式
         corrected_image = self.msicn(image)
         corrected_image = self._align_corrected_image_dtype(corrected_image)
-        with torch.no_grad():
-            raw_features = self._normalize_features(self.backbone_neck(corrected_image))
-            predictions = self.detect_head(raw_features)
+        # 注意: 不使用 torch.no_grad()。
+        # backbone_neck / detect_head 的参数已在 apply_training_stage 中设置 requires_grad=False，
+        # 不会被优化器更新；但计算图必须保留，以确保梯度能从 Loss 经 backbone 反传到 MSICN 输出。
+        # 若用 no_grad 包裹，backbone 的前向不记录图，corrected_image 的梯度链断开，
+        # MSICN 将永远得不到任何梯度，阶段 B 训练失效。
+        raw_features = self._normalize_features(self.backbone_neck(corrected_image))
+        predictions = self.detect_head(raw_features)
         return predictions
 
-
+    def _normalize_features(self, features: object) -> list[Tensor]:
         # 将 backbone_neck 的输出统一为 [P3, P4, P5] 列表格式
         # 兼容两种返回形式:
         #   dict  : {"p3": tensor, "p4": tensor, "p5": tensor}  按 feature_names 顺序取

@@ -7,6 +7,20 @@ conda activate ai2
 
 ```
 
+### 安装 PyTorch
+
+请不要直接在本项目里无脑安装最新版 `torch`，需要和本机 NVIDIA 驱动版本匹配。
+
+如果你是单卡 4060，且当前驱动较旧、无法支持 CUDA 13，对应推荐先安装 `cu121` 版 PyTorch：
+
+```bash
+conda activate ai2
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+如果你已经安装了与驱动匹配的 PyTorch，可以跳过这一步。
+
 ### 克隆 yolov7 仓库
 ```bash
 # 请在项目根目录下克隆 yolov7 仓库, yolov7/ 已经被添加到 .gitignore 中，确保不会被提交到版本控制系统
@@ -26,10 +40,59 @@ pip install -r yolov7/requirements.txt
 pip install -r requirements.txt
 ```
 
+说明：
+
+1. 根目录 [requirements.txt](requirements.txt) 不再直接声明 `torch`，避免把你已经安装好的 CUDA 匹配版本覆盖掉。
+2. 训练依赖仍然以 [yolov7/requirements.txt](yolov7/requirements.txt) 为主，根目录依赖补充本项目脚本直接使用的库。
+
 ### 解压测试集
 ```bash
 unzip test_images.zip -d test_images
 ```
+
+### ExDark 数据预处理
+
+仓库根目录提供了 [data-process.py](data-process.py)，用于把原始 ExDark 数据集转换为 YOLO 训练格式，并自动回写 [configs/train.yaml](configs/train.yaml) 的数据集路径。
+
+先修改脚本顶部宏定义：
+
+1. `EXDARK_IMG_DIR`：ExDark 图像目录。
+2. `EXDARK_ANNO_DIR`：ExDark 标注目录。
+
+ExDark 原始标注不是 YOLO 格式，实际格式为：
+
+```text
+% bbGt version=3
+ClassName x y w h 0 0 0 0 0 0 0
+```
+
+其中：
+
+1. `ClassName` 是类别名。
+2. `x y` 是左上角绝对像素坐标。
+3. `w h` 是绝对像素宽高。
+
+脚本会自动转换为 YOLO 需要的归一化格式：
+
+```text
+class_id x_center y_center width height
+```
+
+运行命令：
+
+```bash
+cd /home/pushk3n/github-ai2
+python data-process.py
+```
+
+处理完成后会生成：
+
+1. `data/Exdark/images/train|val`
+2. `data/Exdark/labels/train|val`
+3. `data/Exdark/train.txt`
+4. `data/Exdark/val.txt`
+
+并自动更新 [configs/train.yaml](configs/train.yaml) 中的 `dataset.train_path` 和 `dataset.val_path`。
 
 ### 训练介绍
 
@@ -40,7 +103,7 @@ unzip test_images.zip -d test_images
 三阶段与 PRD 的对应关系如下：
 
 1. 阶段 A：直接加载 yolov7.pt，视为正常光照预训练已完成，并保存 stage_a_loaded.pt。
-2. 阶段 B：只训练 MSICN，显式冻结 YOLO backbone_neck 和 detect_head，且冻结部分前向使用 no_grad。
+2. 阶段 B：只训练 MSICN，显式冻结 YOLO backbone_neck 和 detect_head；冻结模块参数不更新，但梯度链保留，以便检测损失能够反传回 MSICN。
 3. 阶段 C：解冻 MSICN、YOLO backbone_neck、FIE 和 detect_head，进行端到端联合微调。
 
 训练脚本默认行为：
@@ -49,6 +112,8 @@ unzip test_images.zip -d test_images
 2. 优化器默认 Adam，lr=1e-2，min_lr=1e-5。
 3. 默认开启 FIE 后投影，对接原始 YOLOv7 检测头输入通道。
 4. 默认输出目录为 runs/icfie_yolo/。
+5. 当前 [configs/train.yaml](configs/train.yaml) 已按单卡 4060 调整为 `cuda:0 + AMP + grad checkpoint`。
+6. 当前 [configs/train.yaml](configs/train.yaml) 中 `stage_b_epochs` 和 `stage_c_epochs` 默认均为 `1`，用于快速冒烟验证训练链路。
 
 ### 训练数据准备
 
@@ -99,8 +164,8 @@ optimizer:
 	min_lr: 0.00001
 
 schedule:
-	stage_b_epochs: 30
-	stage_c_epochs: 30
+	stage_b_epochs: 1
+	stage_c_epochs: 1
 ```
 
 建议先复制或直接编辑 configs/train.yaml，再启动训练。
@@ -110,29 +175,43 @@ schedule:
 4060 或其他单卡环境可直接运行：
 
 ```bash
-cd /home/pushk3n/ai2
+cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
 
-如果只想快速冒烟验证训练链路，可以先把 epoch 改成 1：
+如果要做正式训练，建议先把 [configs/train.yaml](configs/train.yaml) 中的 `schedule.stage_b_epochs` 和 `schedule.stage_c_epochs` 从 `1` 调大，例如改成 `30`：
 
 ```bash
-cd /home/pushk3n/ai2
+cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
-
-然后把 configs/train.yaml 中的 schedule.stage_b_epochs 和 schedule.stage_c_epochs 改成 1。
 
 ### 双卡 DDP 训练
 
 双 3090 环境可以使用 torchrun：
 
 ```bash
-cd /home/pushk3n/ai2
+cd /home/pushk3n/github-ai2
 torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 ```
 
 对应地，把 configs/train.yaml 里的 hardware.ddp 改为 true，并将 hardware.device 改为 cuda。
+
+### 常见环境问题
+
+如果运行训练时出现：
+
+1. `CUDA initialization: The NVIDIA driver on your system is too old`
+2. `torch.cuda.is_available() == False`
+
+说明当前安装的 PyTorch CUDA 版本高于本机驱动可支持的版本。
+
+解决方式二选一：
+
+1. 安装与当前驱动匹配的 PyTorch 版本，例如上面的 `cu121`。
+2. 升级 NVIDIA 驱动后，再安装更高 CUDA 版本的 PyTorch。
+
+另外，训练入口已经兼容了 PyTorch 2.6+ 对 YOLOv7 `.cache` 文件加载行为的变更，不需要手工删除 `train.cache` / `val.cache` 才能启动。
 
 ### 常用 YAML 字段
 

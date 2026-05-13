@@ -1,0 +1,321 @@
+"""
+ExDark 数据集预处理脚本
+将原始 ExDark 数据集转换为 YOLO 格式，并更新训练配置，之后可直接启动训练。
+
+使用方法：
+    cd /home/pushk3n/github-ai2
+    python data-process.py
+
+前提条件：
+    1. 下载 ExDark 图像集并解压，确保 EXDARK_IMG_DIR 路径正确。
+    2. 下载 ExDark 标注文件（ExDark_Annno），确保 EXDARK_ANNO_DIR 路径正确。
+
+ExDark 标注文件格式（bbGt version=3，文件名 = 图像文件名 + .txt）：
+    % bbGt version=3
+    ClassName x y w h 0 0 0 0 0 0 0
+    ClassName x y w h 0 0 0 0 0 0 0
+    ...
+    其中 x, y 为左上角像素坐标（绝对值），w, h 为像素宽高（绝对值）。
+    同一文件内可包含多个不同类别的 bbox，每行开头为类别名。
+
+输出结构（OUTPUT_DIR）：
+    data/Exdark/
+        images/
+            train/   ← 训练集图像
+            val/     ← 验证集图像
+        labels/
+            train/   ← 训练集 YOLO 格式标注 (.txt)
+            val/     ← 验证集 YOLO 格式标注 (.txt)
+        train.txt    ← 训练集图像路径列表
+        val.txt      ← 验证集图像路径列表
+"""
+
+from __future__ import annotations
+
+# ============================================================
+# 宏定义区 —— 根据本机路径修改以下配置
+# ============================================================
+
+# ExDark 图像根目录（内含 12 个类别子目录，每目录下存放 .jpg/.png 图像）
+EXDARK_IMG_DIR = "/home/pushk3n/桌面/Exdark/ExDark/ExDark"
+
+# ExDark 标注根目录（内含 12 个类别子目录，每目录下存放与图像同名的 .txt 标注文件）
+# 标注文件命名规则：<原始图像文件名>.txt（保留图像扩展名），如 2015_00001.jpg.txt
+EXDARK_ANNO_DIR = "/home/pushk3n/桌面/Exdark/ExDark_Annno/ExDark_Annno"
+
+# 预处理输出目录（相对工作目录 github-ai2/）
+OUTPUT_DIR = "data/Exdark"
+
+# 训练配置文件路径（脚本末尾会自动更新 dataset.train_path / val_path）
+TRAIN_CONFIG_PATH = "configs/train.yaml"
+
+# 验证集占比（0.0~1.0）
+VAL_SPLIT_RATIO = 0.2
+
+# 随机种子（影响训练/验证集划分）
+SPLIT_SEED = 42
+
+# ============================================================
+# 以下内容无需修改
+# ============================================================
+
+import os
+import random
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+from PIL import Image
+
+# ExDark 12 类别（顺序与 train.yaml 保持一致）
+CLASSES = [
+    "Bicycle", "Boat", "Bottle", "Bus", "Car",
+    "Cat", "Chair", "Cup", "Dog", "Motorbike",
+    "People", "Table",
+]
+CLASS_TO_IDX = {cls: idx for idx, cls in enumerate(CLASSES)}
+
+# 支持的图像扩展名（统一为小写再比较）
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
+# ──────────────────────────────────────────────
+# 工具函数
+# ──────────────────────────────────────────────
+
+def find_anno_file(img_path: Path, anno_root: Path) -> Path | None:
+    """根据图像路径，在 anno_root 中寻找对应的标注 .txt 文件。
+
+    ExDark 标注文件命名规则：<原始图像文件名>.txt（包含图像扩展名）
+    例如：图像 2015_00001.jpg → 标注 2015_00001.jpg.txt
+
+    支持两种目录布局：
+    1. anno_root/<ClassName>/<imagename>.<ext>.txt （按类别分子目录）
+    2. anno_root/<imagename>.<ext>.txt             （平铺）
+    """
+    # 标注文件名 = 图像文件名 + ".txt"（保留原始扩展名）
+    anno_name = img_path.name + ".txt"
+    cls_name = img_path.parent.name
+    # 布局 1：按类别子目录
+    candidate1 = anno_root / cls_name / anno_name
+    if candidate1.exists():
+        return candidate1
+    # 布局 2：平铺
+    candidate2 = anno_root / anno_name
+    if candidate2.exists():
+        return candidate2
+    return None
+
+
+def parse_exdark_anno(anno_path: Path, img_w: int, img_h: int) -> list[str]:
+    """解析 ExDark 原始标注文件，返回 YOLO 格式字符串列表。
+
+    ExDark 标注格式（bbGt version=3）：
+        % bbGt version=3
+        ClassName x y w h 0 0 0 0 0 0 0
+        ...
+        其中 x, y 为左上角像素坐标，w, h 为像素宽高（绝对值）。
+        同一文件内可包含多个不同类别的 bbox，每行带类别名。
+
+    YOLO 格式（归一化）：
+        class_id cx cy w h
+        其中 cx, cy 为归一化中心坐标，w, h 为归一化宽高。
+    """
+    yolo_lines: list[str] = []
+    lines = anno_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("%"):
+            # 跳过空行和注释行（如 % bbGt version=3）
+            continue
+
+        parts = line.split()
+        # 格式：ClassName x y w h [其余字段...]
+        if len(parts) < 5:
+            continue
+
+        cls_name = parts[0]
+        class_idx = CLASS_TO_IDX.get(cls_name)
+        if class_idx is None:
+            # 类别名不在 12 类列表中，跳过
+            continue
+
+        try:
+            x, y, bw, bh = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+        except ValueError:
+            continue
+
+        # 防止零宽高
+        if bw <= 0 or bh <= 0 or img_w <= 0 or img_h <= 0:
+            continue
+
+        # 绝对像素坐标（左上角 + 宽高）→ 归一化中心坐标
+        cx = (x + bw / 2.0) / img_w
+        cy = (y + bh / 2.0) / img_h
+        nw = bw / img_w
+        nh = bh / img_h
+
+        # 裁剪至 [0, 1]
+        cx = max(0.0, min(1.0, cx))
+        cy = max(0.0, min(1.0, cy))
+        nw = max(0.0, min(1.0, nw))
+        nh = max(0.0, min(1.0, nh))
+
+        yolo_lines.append(f"{class_idx} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+
+    return yolo_lines
+
+
+def collect_images(img_root: Path) -> list[Path]:
+    """收集 img_root 下所有图像文件，忽略 macOS 元数据目录。"""
+    images: list[Path] = []
+    for p in img_root.rglob("*"):
+        if "__MACOSX" in p.parts:
+            continue
+        if p.suffix.lower() in IMG_EXTS and p.is_file():
+            images.append(p)
+    return images
+
+
+# ──────────────────────────────────────────────
+# 主流程
+# ──────────────────────────────────────────────
+
+def main() -> None:
+    img_root = Path(EXDARK_IMG_DIR)
+    anno_root = Path(EXDARK_ANNO_DIR)
+    out_root = Path(OUTPUT_DIR)
+    config_path = Path(TRAIN_CONFIG_PATH)
+
+    # ── 路径校验 ──────────────────────────────
+    if not img_root.exists():
+        print(f"[错误] 图像目录不存在: {img_root}")
+        print("  请修改脚本顶部的 EXDARK_IMG_DIR 宏定义后重试。")
+        sys.exit(1)
+
+    if not anno_root.exists():
+        print(f"[错误] 标注目录不存在: {anno_root}")
+        print("  请下载 ExDark 标注文件（ExDark_Annno）后，修改脚本顶部的 EXDARK_ANNO_DIR 宏定义。")
+        print("  下载地址: https://github.com/cs-chan/Exclusively-Dark-Image-Dataset/releases")
+        sys.exit(1)
+
+    # ── 创建输出目录 ──────────────────────────
+    for split in ("train", "val"):
+        (out_root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (out_root / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+    # ── 收集图像并划分训练/验证集 ─────────────
+    print("[1/4] 扫描图像文件...")
+    all_images = collect_images(img_root)
+    if not all_images:
+        print(f"[错误] 在 {img_root} 下未找到任何图像文件。")
+        sys.exit(1)
+    print(f"      共找到 {len(all_images)} 张图像。")
+
+    random.seed(SPLIT_SEED)
+    random.shuffle(all_images)
+    n_val = max(1, int(len(all_images) * VAL_SPLIT_RATIO))
+    val_set = set(str(p) for p in all_images[:n_val])
+
+    # ── 拷贝图像 + 转换标注 ───────────────────
+    print("[2/4] 拷贝图像并转换标注为 YOLO 格式...")
+
+    skipped_no_anno = 0
+    skipped_no_bbox = 0
+    processed = 0
+    train_paths: list[str] = []
+    val_paths: list[str] = []
+
+    for img_path in all_images:
+        split = "val" if str(img_path) in val_set else "train"
+
+        # 目标路径（保留 <ClassName>_<stem> 防止不同类别同名文件冲突）
+        cls_prefix = img_path.parent.name
+        new_name = f"{cls_prefix}_{img_path.name}"
+        dst_img = out_root / "images" / split / new_name
+        dst_lbl = out_root / "labels" / split / (Path(new_name).stem + ".txt")
+
+        # 寻找标注文件
+        anno_path = find_anno_file(img_path, anno_root)
+        if anno_path is None:
+            skipped_no_anno += 1
+            continue
+
+        # 读取图像尺寸（仅读元数据，不解码全图，节省内存）
+        try:
+            with Image.open(img_path) as im:
+                img_w, img_h = im.size
+        except Exception as e:
+            print(f"  [警告] 无法读取图像 {img_path}: {e}，跳过。")
+            skipped_no_anno += 1
+            continue
+
+        # 解析标注
+        yolo_lines = parse_exdark_anno(anno_path, img_w, img_h)
+        if not yolo_lines:
+            skipped_no_bbox += 1
+            continue
+
+        # 拷贝图像
+        shutil.copy2(img_path, dst_img)
+
+        # 写入 YOLO 标注
+        dst_lbl.write_text("\n".join(yolo_lines) + "\n", encoding="utf-8")
+
+        # 记录绝对路径（train.txt 使用绝对路径，便于从任意目录启动训练）
+        abs_img_path = str(dst_img.resolve())
+        if split == "train":
+            train_paths.append(abs_img_path)
+        else:
+            val_paths.append(abs_img_path)
+
+        processed += 1
+
+    print(f"      处理完成: {processed} 张，跳过（无标注）: {skipped_no_anno}，跳过（空 bbox）: {skipped_no_bbox}。")
+
+    if processed == 0:
+        print("[错误] 没有任何图像被成功处理，请检查标注目录和格式。")
+        sys.exit(1)
+
+    # ── 写入索引文件 ──────────────────────────
+    print("[3/4] 写入 train.txt / val.txt 索引文件...")
+
+    train_txt = out_root / "train.txt"
+    val_txt = out_root / "val.txt"
+    train_txt.write_text("\n".join(train_paths) + "\n", encoding="utf-8")
+    val_txt.write_text("\n".join(val_paths) + "\n", encoding="utf-8")
+
+    print(f"      训练集: {len(train_paths)} 张 → {train_txt}")
+    print(f"      验证集: {len(val_paths)} 张 → {val_txt}")
+
+    # ── 更新 configs/train.yaml ───────────────
+    print("[4/4] 更新训练配置文件...")
+
+    if not config_path.exists():
+        print(f"  [警告] 配置文件 {config_path} 不存在，跳过更新。")
+    else:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+
+        cfg.setdefault("dataset", {})
+        cfg["dataset"]["train_path"] = str(train_txt.resolve())
+        cfg["dataset"]["val_path"] = str(val_txt.resolve())
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+        print(f"      已将 train_path / val_path 写入 {config_path}。")
+
+    print()
+    print("=" * 60)
+    print("预处理完成！可通过以下命令开始训练：")
+    print()
+    print("    cd src")
+    print("    python train.py --config ../configs/train.yaml")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

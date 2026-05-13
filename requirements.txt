@@ -1,2 +1,10 @@
-torch
-numpy
+# 根目录额外依赖。
+# PyTorch / TorchVision / TorchAudio 请按 README 中与本机 CUDA / 驱动匹配的方式单独安装，
+# 不要在这里直接安装不区分 CUDA 版本的 torch，避免覆盖当前可用环境。
+
+numpy>=1.18.5,<1.24.0
+PyYAML>=5.3.1
+Pillow>=7.1.2
+matplotlib>=3.2.2
+opencv-python>=4.1.1
+tqdm>=4.41.0

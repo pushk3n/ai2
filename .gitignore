@@ -1,5 +1,10 @@
 #输出结果
 results/
+runs/
+
+# 数据集
+data/
+
 # 图像测试集
 test_sample/
 # 忽略 yolov7：如果将 yolov7 作为外部依赖，可选择忽略它（若已被跟踪需手动取消跟踪）

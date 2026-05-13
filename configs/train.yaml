@@ -1,144 +1,48 @@
-# 全局随机种子。
-# 用于固定 Python / NumPy / PyTorch 的随机状态，保证训练过程尽可能可复现。
-# 更换该值会影响参数初始化、数据打乱顺序和部分增强的随机结果。
 seed: 42
-
-# 本次训练的输出根目录。
-# 训练脚本通常会在该目录下保存：配置快照、日志、权重文件、验证结果等。
-# 如果希望保留多组实验，建议每次运行时在该目录下再拼接时间戳或实验名。
 run_dir: runs/icfie_yolo
-
-# YOLOv7 的损失超参数文件路径。
-# 该文件一般控制 box / cls / obj 等损失项权重以及部分训练超参。
-# 当前使用 p5 版本超参，适配 416 输入和常规三尺度检测头。
 hyp_path: yolov7/data/hyp.scratch.p5.yaml
-
-# 是否在 FIE 融合后追加 1x1 投影层，把 3C 通道投影回原始检测头期望的 C 通道。
-# true: 更容易直接复用原始 YOLOv7 检测头，显存和改造成本更低。
-# false: 忠于论文原始 3C 拼接输出，但检测头输入通道也必须同步改造。
 project_after_fusion: true
-
-# 权重保存频率，单位为 epoch。
-# 设为 1 表示每个 epoch 都保存一次，便于回溯与断点恢复，但会占用更多磁盘空间。
 save_every: 1
-
-# 是否使用 OTA Loss。
-# true: 使用 YOLO 系列中的 OTA 动态标签分配损失，通常需要训练脚本显式支持。
-# false: 使用当前项目默认的检测损失实现。
 use_ota_loss: false
-
-# 是否将训练图像预先缓存到内存中。
-# true: 数据加载更快，但会明显增加内存占用。
-# false: 每次按需从磁盘读取，更省内存，适合普通工作站。
 cache_images: false
-
-# 是否启用矩形训练（rect training）。
-# true: 按图像长宽比分组，减少 padding 浪费，常用于提升吞吐。
-# false: 常规随机训练流程，更简单，也更适合与数据增强共同使用。
 rect: false
-
-# 数据集相关配置。
 dataset:
-  # 训练集索引文件路径。
-  # 文件中通常每行对应一张训练图像路径，标签路径由数据集加载器按约定推导。
-  train_path: data/train.txt
-
-  # 验证集索引文件路径。
-  # null 表示当前暂不单独执行验证，或由训练脚本内部决定是否跳过验证阶段。
-  val_path: null
-
-  # 数据集类别数。
-  # ExDark 复现任务中通常为 12；若后续切换数据集，该值必须与标签一致。
+  train_path: /home/pushk3n/github-ai2/data/Exdark/train.txt
+  val_path: /home/pushk3n/github-ai2/data/Exdark/val.txt
   num_classes: 12
-
-  # 类别名称列表。
-  # 若为空，训练脚本可只使用类别数；若需要可视化、评估输出或导出结果，建议补全。
-  class_names: []
-
-  # 输入图像尺寸。
-  # 论文与当前工程默认采用 416，需与 YOLO 配置、letterbox 和训练脚本保持一致。
+  class_names:
+  - Bicycle
+  - Boat
+  - Bottle
+  - Bus
+  - Car
+  - Cat
+  - Chair
+  - Cup
+  - Dog
+  - Motorbike
+  - People
+  - Table
   image_size: 416
-
-  # 是否将所有目标视为同一类。
-  # true: 用于单类检测任务。
-  # false: 按真实多类别进行训练。
   single_cls: false
-
-# YOLOv7 主干、颈部和检测头相关配置。
 yolo:
-  # YOLOv7 模型结构配置文件。
-  # 通常用于实例化 backbone / neck / detect head，并确定通道数与层级结构。
   cfg_path: yolov7/cfg/training/yolov7.yaml
-
-  # 预训练权重路径。
-  # 阶段 A 通常直接加载该权重作为正常光照检测器基线，再进入阶段 B / C。
   weights_path: yolov7/yolov7.pt
-
-# 硬件与运行方式配置。
 hardware:
-  # 训练设备。
-  # 可取值示例：cpu、cuda、cuda:0。
-  # 真正训练时建议改为 cuda 或指定具体 GPU。
-  device: cpu
-
-  # 是否启用自动混合精度 AMP。
-  # 4060 等显存较小显卡建议开启；CPU 训练或排查数值问题时可关闭。
-  use_amp: false
-
-  # 单次前向/反向的每卡 batch size。
-  # 在 DDP 场景下，这是“每张卡”的 batch，不是全局总 batch。
+  device: cuda:0
+  use_amp: true
   batch_size: 4
-
-  # 梯度累积步数。
-  # 等效总 batch size = batch_size × accumulate_steps × GPU 数量。
-  # 4060 显存有限时可以通过增大该值来模拟更大 batch。
   accumulate_steps: 4
-
-  # DataLoader 工作进程数。
-  # 过小会造成数据供给不足，过大可能导致 CPU / 内存压力上升。
   num_workers: 4
-
-  # 是否为 DataLoader 启用 pin_memory。
-  # 在 GPU 训练时通常建议开启，以加快主机内存到显存的数据搬运。
   pin_memory: true
-
-  # 是否使用分布式数据并行 DDP。
-  # true 时训练脚本应通过 torchrun 启动，并为每个进程绑定对应 GPU。
   ddp: false
-
-  # 是否对较重模块启用梯度检查点。
-  # true: 降低显存占用，但会增加反向传播计算开销。
-  use_grad_checkpoint: false
-
-# 优化器相关超参数。
+  use_grad_checkpoint: true
 optimizer:
-  # 初始学习率。
-  # 论文中使用 Adam，初始学习率为 1e-2；若训练不稳定，可适当降低。
   lr: 0.01
-
-  # 学习率下限。
-  # 通常用于 cosine / step / warmup+decay 等调度器的最小值约束。
-  min_lr: 0.00001
-
-  # 权重衰减系数。
-  # 用于抑制过拟合；不同参数组（如 bias / BN）在代码里可能需要区别处理。
+  min_lr: 1.0e-05
   weight_decay: 0.0005
-
-  # Adam / AdamW 的一阶动量系数 beta1。
   beta1: 0.937
-
-  # Adam / AdamW 的二阶动量系数 beta2。
   beta2: 0.999
-
-# 训练阶段日程配置。
-# 本项目当前聚焦论文中的阶段 B 和阶段 C：
-# - 阶段 B：冻结 YOLO 检测器，仅训练 MSICN，使其用检测损失学习光照矫正。
-# - 阶段 C：解冻检测器并启用 FIE，进行联合微调。
 schedule:
-  # 阶段 B 的训练轮数。
-  # 数值越大，MSICN 越有机会先学到稳定的光照校正映射。
-  stage_b_epochs: 30
-
-  # 阶段 C 的训练轮数。
-  # 该阶段会联合优化更多模块，是最终性能收敛的关键阶段。
-  stage_c_epochs: 30
+  stage_b_epochs: 1
+  stage_c_epochs: 1

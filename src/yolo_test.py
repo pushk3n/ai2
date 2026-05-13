@@ -31,7 +31,7 @@ from torch import Tensor, nn
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 YOLOV7_ROOT = PROJECT_ROOT / "yolov7"
 if str(YOLOV7_ROOT) not in sys.path:
-	sys.path.insert(0, str(YOLOV7_ROOT))
+	sys.path.append(str(YOLOV7_ROOT))
 
 from infer import (
 	configure_matplotlib_cjk_font,

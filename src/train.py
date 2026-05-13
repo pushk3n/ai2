@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import os
 import random
 import sys
@@ -22,7 +23,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 YOLOV7_ROOT = PROJECT_ROOT / "yolov7"
 if str(YOLOV7_ROOT) not in sys.path:
-    sys.path.insert(0, str(YOLOV7_ROOT))
+    sys.path.append(str(YOLOV7_ROOT))
 
 from fie import FIEBlockConfig, MultiScaleFIEConfig
 from icfie_yolo import ICFIEYOLO, ICFIEYOLOConfig
@@ -99,6 +100,27 @@ def build_dataloader_option(dataset_config: DatasetConfig) -> SimpleNamespace:
     return SimpleNamespace(single_cls=dataset_config.single_cls)
 
 
+@contextmanager
+def yolov7_cache_torch_load_compat():
+    # PyTorch 2.6+ 将 torch.load 的 weights_only 默认值改为 True。
+    # YOLOv7 的数据集 .cache 文件存的是普通 Python / NumPy 对象，
+    # 不是纯权重张量，直接按默认行为加载会触发 UnpicklingError。
+    # 这里只在 create_dataloader 调用期间临时改回 weights_only=False，
+    # 作用范围限定在本地受信任的数据缓存读取，不影响其他调用点。
+    original_torch_load = torch.load
+
+    def compatible_torch_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return original_torch_load(*args, **kwargs)
+
+    torch.load = compatible_torch_load
+    try:
+        yield
+    finally:
+        torch.load = original_torch_load
+
+
 def load_hyperparameters(config: TrainConfig) -> dict[str, float]:
     with open(config.hyp_path, encoding="utf-8") as handle:
         hyp = yaml.safe_load(handle)
@@ -144,24 +166,25 @@ def build_train_dataloader(
         raise FileNotFoundError(f"未找到训练集路径: {train_path}")
 
     image_size = check_img_size(config.dataset.image_size, stride)
-    dataloader, dataset = create_dataloader(
-        str(train_path),
-        image_size,
-        config.hardware.batch_size,
-        stride,
-        build_dataloader_option(config.dataset),
-        hyp=hyp,
-        augment=True,
-        cache=config.cache_images,
-        pad=0.0,
-        rect=config.rect,
-        rank=rank,
-        world_size=world_size,
-        workers=config.hardware.num_workers,
-        image_weights=False,
-        quad=False,
-        prefix="train: ",
-    )
+    with yolov7_cache_torch_load_compat():
+        dataloader, dataset = create_dataloader(
+            str(train_path),
+            image_size,
+            config.hardware.batch_size,
+            stride,
+            build_dataloader_option(config.dataset),
+            hyp=hyp,
+            augment=True,
+            cache=config.cache_images,
+            pad=0.0,
+            rect=config.rect,
+            rank=rank,
+            world_size=world_size,
+            workers=config.hardware.num_workers,
+            image_weights=False,
+            quad=False,
+            prefix="train: ",
+        )
     return dataloader, dataset, image_size
 
 
@@ -353,9 +376,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_cli_config_path(config_path: Path, *, project_root: Path) -> Path:
+    candidate = config_path.expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    search_roots = (
+        Path.cwd(),
+        project_root,
+        Path(__file__).resolve().parent,
+    )
+    for base_dir in search_roots:
+        resolved_path = (base_dir / candidate).resolve()
+        if resolved_path.exists():
+            return resolved_path
+
+    # 若所有候选都不存在，则保留基于当前工作目录的解析结果，交给后续 open 抛出明确错误。
+    return (Path.cwd() / candidate).resolve()
+
+
 def main() -> None:
     args = parse_args()
-    config = load_train_config(args.config, project_root=PROJECT_ROOT)
+    resolved_config_path = resolve_cli_config_path(args.config, project_root=PROJECT_ROOT)
+    config = load_train_config(resolved_config_path, project_root=PROJECT_ROOT)
     config.run_dir.mkdir(parents=True, exist_ok=True)
 
     device, rank, _, world_size = init_distributed_mode(config.hardware)
@@ -368,12 +411,12 @@ def main() -> None:
 
         save_stage_a_checkpoint(model, config, rank)
         if is_main_process(rank):
-            print(f"[配置文件] {args.config.expanduser().resolve()}")
+            print(f"[配置文件] {resolved_config_path}")
             print(f"[阶段A] 已加载 YOLOv7 预训练权重  视为完成")
             print(f"[配置] img_size={image_size} classes={len(class_names)} stride={stride}")
             # 将 YAML 配置快照写入 run_dir  便于后续复现实验
             import shutil
-            shutil.copy2(args.config, config.run_dir / "train_config_snapshot.yaml")
+            shutil.copy2(resolved_config_path, config.run_dir / "train_config_snapshot.yaml")
 
         train_stage(
             model=model,

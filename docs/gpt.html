@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>ICFIE-YOLO 算法流程图</title>
+	<style>
+		:root {
+			--bg: #f4efe7;
+			--panel: rgba(255, 250, 244, 0.88);
+			--ink: #182126;
+			--muted: #5e676f;
+			--line: #a9b3ba;
+			--teal: #0d6e6e;
+			--teal-soft: #d8efec;
+			--amber: #d48a1f;
+			--amber-soft: #fff0d3;
+			--brick: #9d3c2c;
+			--brick-soft: #f6ddd7;
+			--blue: #225d87;
+			--blue-soft: #d9ecfb;
+			--shadow: 0 18px 44px rgba(31, 42, 53, 0.12);
+			--radius: 20px;
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		body {
+			margin: 0;
+			font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+			color: var(--ink);
+			background:
+				radial-gradient(circle at top left, rgba(13, 110, 110, 0.15), transparent 24%),
+				radial-gradient(circle at top right, rgba(212, 138, 31, 0.14), transparent 26%),
+				linear-gradient(180deg, #fbf7f1 0%, #efe6d9 100%);
+		}
+
+		.page {
+			max-width: 1440px;
+			margin: 0 auto;
+			padding: 28px;
+		}
+
+		.hero,
+		.stage,
+		.mapping {
+			background: var(--panel);
+			border: 1px solid rgba(24, 33, 38, 0.08);
+			border-radius: 28px;
+			box-shadow: var(--shadow);
+			backdrop-filter: blur(6px);
+		}
+
+		.hero {
+			padding: 28px 30px 22px;
+			margin-bottom: 18px;
+		}
+
+		.eyebrow {
+			display: inline-flex;
+			padding: 6px 12px;
+			border-radius: 999px;
+			background: var(--teal-soft);
+			color: var(--teal);
+			font-size: 13px;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+		}
+
+		h1 {
+			margin: 14px 0 10px;
+			font-size: clamp(28px, 3.4vw, 46px);
+			line-height: 1.15;
+		}
+
+		.hero p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 16px;
+			line-height: 1.75;
+			max-width: 1100px;
+		}
+
+		.chip-row {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-top: 18px;
+		}
+
+		.chip {
+			padding: 8px 12px;
+			border-radius: 999px;
+			border: 1px solid rgba(24, 33, 38, 0.1);
+			background: rgba(255, 255, 255, 0.78);
+			font-size: 13px;
+			color: var(--muted);
+		}
+
+		.grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 18px;
+			margin: 18px 0;
+		}
+
+		.stage {
+			padding: 22px;
+		}
+
+		.stage-head {
+			display: flex;
+			justify-content: space-between;
+			gap: 12px;
+			align-items: flex-start;
+			margin-bottom: 14px;
+		}
+
+		.stage-head h2 {
+			margin: 0;
+			font-size: 24px;
+		}
+
+		.stage-head p {
+			margin: 6px 0 0;
+			color: var(--muted);
+			line-height: 1.7;
+			font-size: 14px;
+			max-width: 520px;
+		}
+
+		.tag {
+			flex: 0 0 auto;
+			padding: 7px 12px;
+			border-radius: 999px;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+		}
+
+		.training .tag {
+			background: var(--amber-soft);
+			color: var(--amber);
+		}
+
+		.inference .tag {
+			background: var(--blue-soft);
+			color: var(--blue);
+		}
+
+		.flow-block {
+			border: 1px dashed rgba(24, 33, 38, 0.14);
+			border-radius: 22px;
+			padding: 18px;
+			margin-top: 14px;
+			background: rgba(255, 255, 255, 0.55);
+		}
+
+		.flow-title {
+			margin: 0 0 12px;
+			font-size: 15px;
+			font-weight: 800;
+			color: var(--ink);
+		}
+
+		.lane {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: stretch;
+			gap: 10px;
+		}
+
+		.arrow,
+		.down {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			min-width: 42px;
+			color: var(--line);
+			font-weight: 800;
+			font-size: 26px;
+		}
+
+		.down {
+			width: 100%;
+			min-height: 18px;
+			font-size: 30px;
+			margin: 2px 0;
+		}
+
+		.card {
+			flex: 1 1 180px;
+			min-width: 180px;
+			border-radius: var(--radius);
+			padding: 16px 16px 14px;
+			border: 1px solid rgba(24, 33, 38, 0.08);
+			background: #ffffff;
+			position: relative;
+			overflow: hidden;
+		}
+
+		.card::before {
+			content: "";
+			position: absolute;
+			inset: 0 0 auto 0;
+			height: 5px;
+			background: rgba(24, 33, 38, 0.1);
+		}
+
+		.card h3,
+		.card h4 {
+			margin: 0 0 8px;
+			font-size: 16px;
+		}
+
+		.card p,
+		.card li {
+			margin: 0;
+			font-size: 13px;
+			color: var(--muted);
+			line-height: 1.7;
+		}
+
+		.card ul {
+			margin: 0;
+			padding-left: 18px;
+		}
+
+		.input::before { background: var(--amber); }
+		.process::before { background: var(--teal); }
+		.feature::before { background: var(--blue); }
+		.output::before { background: var(--brick); }
+		.note::before { background: linear-gradient(90deg, var(--amber), var(--blue)); }
+
+		.subflow {
+			display: grid;
+			grid-template-columns: repeat(4, minmax(0, 1fr));
+			gap: 10px;
+			margin-top: 12px;
+		}
+
+		.subflow.three {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
+		.subcard {
+			border-radius: 18px;
+			padding: 14px;
+			background: #fbf9f6;
+			border: 1px solid rgba(24, 33, 38, 0.08);
+		}
+
+		.subcard h4 {
+			margin: 0 0 6px;
+			font-size: 14px;
+		}
+
+		.subcard p {
+			font-size: 12px;
+			color: var(--muted);
+			line-height: 1.7;
+			margin: 0;
+		}
+
+		.mapping {
+			padding: 22px;
+		}
+
+		.mapping h2 {
+			margin: 0 0 12px;
+			font-size: 24px;
+		}
+
+		.mapping-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 12px;
+		}
+
+		.map-card {
+			border-radius: 20px;
+			padding: 16px;
+			background: #ffffff;
+			border: 1px solid rgba(24, 33, 38, 0.08);
+		}
+
+		.map-card h3 {
+			margin: 0 0 8px;
+			font-size: 15px;
+		}
+
+		.map-card p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 13px;
+			line-height: 1.8;
+		}
+
+		code {
+			font-family: Consolas, "Cascadia Code", monospace;
+			font-size: 12.5px;
+			padding: 1px 6px;
+			border-radius: 999px;
+			background: rgba(34, 93, 135, 0.1);
+			color: #123952;
+		}
+
+		.footnote {
+			margin-top: 12px;
+			padding: 14px 16px;
+			border-radius: 18px;
+			background: #fff8e8;
+			border: 1px solid rgba(212, 138, 31, 0.18);
+			color: #7a5a1c;
+			font-size: 13px;
+			line-height: 1.7;
+		}
+
+		@media (max-width: 1100px) {
+			.grid,
+			.mapping-grid,
+			.subflow,
+			.subflow.three {
+				grid-template-columns: 1fr;
+			}
+		}
+
+		@media (max-width: 720px) {
+			.page {
+				padding: 16px;
+			}
+
+			.hero,
+			.stage,
+			.mapping {
+				border-radius: 22px;
+			}
+
+			.stage-head {
+				flex-direction: column;
+			}
+
+			.arrow {
+				width: 100%;
+				min-height: 24px;
+				transform: rotate(90deg);
+			}
+		}
+	</style>
+</head>
+<body>
+	<div class="page">
+		<section class="hero">
+			<span class="eyebrow">ICFIE-YOLO / HTML 算法流程图</span>
+			<h1>基于 ICFIE-YOLO 的低照度目标检测复现流程</h1>
+			<p>
+				这张图把论文里的 MSICN、FIE、基于检测损失的对齐训练，以及最终推理主线拆成可直接对应 Python 类、模块和训练函数的粒度。
+				后续写代码时，可以把图中的每个方框直接落成一个类、一个 forward 过程，或者一个独立的训练阶段函数。
+			</p>
+			<div class="chip-row">
+				<span class="chip">主线 1：训练阶段分两步，先对齐训练，再全模型微调</span>
+				<span class="chip">主线 2：推理阶段只走 低照度图像 → MSICN → YOLOv7 → FIE → Detect</span>
+				<span class="chip">代码对齐：建议按类级别拆分 MSICN、FIE、ICFIEYOLO</span>
+			</div>
+		</section>
+
+		<div class="grid">
+			<section class="stage training">
+				<div class="stage-head">
+					<div>
+						<h2>训练阶段</h2>
+						<p>对应训练脚本中的两个阶段：先得到正常照度检测器，再冻结检测器训练 MSICN，最后解冻全模型做低照度微调。</p>
+					</div>
+					<span class="tag">train.py / trainer.py</span>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">阶段 A：正常照度预训练检测器</p>
+					<div class="lane">
+						<div class="card input">
+							<h3>正常照度数据集</h3>
+							<p>例如 MS COCO 或其他常规检测数据集</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card process">
+							<h3>YOLOv7 检测器预训练</h3>
+							<p>训练 backbone、neck、detect head，得到正常照度权重</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card output">
+							<h3>Baseline 权重</h3>
+							<p>作为后续 ICFIE-YOLO 的初始化检测器参数</p>
+						</div>
+					</div>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">阶段 B：基于检测损失的对齐训练</p>
+					<div class="lane">
+						<div class="card input">
+							<h3>低照度图像 + 标注</h3>
+							<p>输入为 IMG_L 和 detection labels</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card process">
+							<h3>MSICN 光照矫正</h3>
+							<p>对低照度图像做可学习光照调整，输出 IMG_C</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card process">
+							<h3>冻结的 YOLOv7 检测器</h3>
+							<p>仅前向计算检测损失，检测器参数不更新</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card output">
+							<h3>Loss_C 反向传播</h3>
+							<p>只更新 MSICN 参数，使矫正结果更利于检测</p>
+						</div>
+					</div>
+					<div class="footnote">
+						实现要点：代码里通常不需要显式计算论文示意中的 Loss_H，只需要先有一个正常照度预训练检测器，然后固定它，用低照度检测损失 Loss_C 去优化 MSICN。
+					</div>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">阶段 C：全模型微调</p>
+					<div class="lane">
+						<div class="card process">
+							<h3>解冻 ICFIE-YOLO 全模型</h3>
+							<p>MSICN + YOLOv7 Backbone/Neck + FIE + Detect 全部参与训练</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card output">
+							<h3>低照度最终权重</h3>
+							<p>用于 ExDark、DarkFace 等低照度场景推理</p>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<section class="stage inference">
+				<div class="stage-head">
+					<div>
+						<h2>推理阶段</h2>
+						<p>对应模型 forward 主线。建议你后面把每个模块分别实现成独立类，最后由 ICFIEYOLO.forward 串起来。</p>
+					</div>
+					<span class="tag">model.py / modules.py</span>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">主推理链路</p>
+					<div class="lane">
+						<div class="card input">
+							<h3>低照度输入图像</h3>
+							<p>shape 约为 B × 3 × H × W</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card process">
+							<h3>MSICN</h3>
+							<p>先提光照特征，再做全局/局部矫正，输出校正图像</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card feature">
+							<h3>YOLOv7 Backbone + Neck</h3>
+							<p>提取多尺度特征，例如 P3 / P4 / P5</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card feature">
+							<h3>FIE 检测头增强</h3>
+							<p>对多尺度特征做空间交互和通道交互增强</p>
+						</div>
+						<div class="arrow">→</div>
+						<div class="card output">
+							<h3>Detect 输出</h3>
+							<p>类别、边界框、置信度，随后做 NMS</p>
+						</div>
+					</div>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">MSICN 内部结构</p>
+					<div class="subflow">
+						<div class="subcard">
+							<h4>IFE</h4>
+							<p>6 层 3×3 卷积提取多尺度光照特征，并拼接得到 illumination features。</p>
+						</div>
+						<div class="subcard">
+							<h4>GIC</h4>
+							<p>大感受野卷积 + 全局平均池化，输出 3 通道全局矫正系数 k。</p>
+						</div>
+						<div class="subcard">
+							<h4>LIC</h4>
+							<p>多尺度局部矫正，输出 10 组局部系数 k_i，用于拟合复杂局部光照。</p>
+						</div>
+						<div class="subcard">
+							<h4>NLIS</h4>
+							<p>先用 k 做全局二次曲线调整，再把 10 组 k_i 迭代堆叠到图像上。</p>
+						</div>
+					</div>
+				</div>
+
+				<div class="flow-block">
+					<p class="flow-title">FIE 内部结构</p>
+					<div class="subflow three">
+						<div class="subcard">
+							<h4>空间交互分支</h4>
+							<p>对像素间关系建模，强调目标区域上下文，抑制背景与噪声干扰。</p>
+						</div>
+						<div class="subcard">
+							<h4>通道交互分支</h4>
+							<p>对通道语义关系建模。<strong>(注：需通过上采样将特征图恢复至原尺寸后才能拼接)</strong></p>
+						</div>
+						<div class="subcard">
+							<h4>Concat 输出</h4>
+							<p>将原始特征、空间增强特征、通道增强特征拼接后送入检测头。</p>
+						</div>
+					</div>
+				</div>
+			</section>
+		</div>
+
+		<section class="mapping">
+			<h2>与 Python 实现对齐的模块建议</h2>
+			<div class="mapping-grid">
+			<div class="map-card">
+					<h3>顶层模型</h3>
+					<p><code>class ICFIEYOLO(nn.Module)</code> &mdash; <code>icfie_yolo.py</code><br>forward 主线：image → msicn → backbone_neck → fie → detect_head。<br>本文件仅负责串联，不含业务逻辑。</p>
+				</div>
+				<div class="map-card">
+					<h3>光照矫正模块</h3>
+					<p><code>class MSICN(nn.Module)</code> &mdash; <code>msicn.py</code><br>内部组合 <code>IFE</code>、<code>GIC</code>、<code>LIC</code>、<code>NLIS</code>，输出校正图像。</p>
+				</div>
+				<div class="map-card">
+					<h3>特征提取模块</h3>
+					<p><code>YOLOv7BackboneNeckAdapter</code> &mdash; <code>yolo_wrapper.py</code><br>生产路径：截取真实 YOLOv7 backbone+neck，输出 [P3, P4, P5]。<br><code>MockYOLOv7BackboneNeck</code>：冒烟测试用轻量替代。</p>
+				</div>
+				<div class="map-card">
+					<h3>特征增强模块</h3>
+					<p><code>class MultiScaleFIE(nn.Module)</code> &mdash; <code>fie.py</code><br>对 P3/P4/P5 三尺度分别执行空间交互 + 通道交互，concat 输出 3C 通道特征。</p>
+				</div>
+				<div class="map-card">
+					<h3>检测头模块</h3>
+					<p><code>YOLOv7DetectHeadAdapter</code> &mdash; <code>detect.py</code><br>生产路径：直接包装 YOLOv7 IDetect 层。<br><code>MockYOLOv7DetectHead</code>：冒烟测试用 1×1 Conv 替代。</p>
+				</div>
+				<div class="map-card">
+					<h3>训练阶段函数</h3>
+					<p><code>apply_training_stage(model, STAGE_B)</code><br><code>apply_training_stage(model, STAGE_C)</code><br>三阶段均在 <code>train.py</code> 中显式调用，冻结/解冻通过 <code>requires_grad</code> 显式控制。</p>
+				</div>
+			</div>
+		</section>
+	</div>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>ICFIE-YOLO 算法流程图</title>
+	<style>
+		:root {
+			--bg: #f6f1e8;
+			--panel: rgba(255, 251, 245, 0.94);
+			--ink: #1d2a2f;
+			--muted: #5b6a6f;
+			--line: #7f8c8d;
+			--accent: #b84c2a;
+			--accent-soft: #f1c3b0;
+			--blue: #3f6c7b;
+			--green: #4d785e;
+			--gold: #b98a31;
+			--shadow: 0 18px 40px rgba(35, 32, 28, 0.12);
+			--radius: 22px;
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		body {
+			margin: 0;
+			font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+			color: var(--ink);
+			background:
+				radial-gradient(circle at top left, rgba(184, 76, 42, 0.10), transparent 28%),
+				radial-gradient(circle at right center, rgba(63, 108, 123, 0.12), transparent 24%),
+				linear-gradient(180deg, #fbf8f2 0%, var(--bg) 100%);
+		}
+
+		body::before {
+			content: "";
+			position: fixed;
+			inset: 0;
+			background-image:
+				linear-gradient(rgba(29, 42, 47, 0.04) 1px, transparent 1px),
+				linear-gradient(90deg, rgba(29, 42, 47, 0.04) 1px, transparent 1px);
+			background-size: 28px 28px;
+			pointer-events: none;
+			opacity: 0.35;
+		}
+
+		.page {
+			position: relative;
+			max-width: 1480px;
+			margin: 0 auto;
+			padding: 36px 20px 44px;
+		}
+
+		.hero {
+			padding: 28px 30px 26px;
+			border: 2px solid rgba(29, 42, 47, 0.14);
+			border-radius: 30px;
+			background: linear-gradient(135deg, rgba(255, 251, 245, 0.96), rgba(248, 241, 232, 0.92));
+			box-shadow: var(--shadow);
+		}
+
+		.hero-top {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 20px;
+			flex-wrap: wrap;
+			margin-bottom: 14px;
+		}
+
+		.tag {
+			display: inline-flex;
+			align-items: center;
+			padding: 8px 14px;
+			border-radius: 999px;
+			border: 1px solid rgba(184, 76, 42, 0.22);
+			background: rgba(184, 76, 42, 0.08);
+			color: var(--accent);
+			font-size: 14px;
+			letter-spacing: 0.08em;
+		}
+
+		h1 {
+			margin: 0;
+			font-size: clamp(30px, 4vw, 46px);
+			line-height: 1.15;
+			letter-spacing: 0.02em;
+		}
+
+		.hero p {
+			margin: 0;
+			font-size: 16px;
+			line-height: 1.7;
+			color: var(--muted);
+			max-width: 980px;
+		}
+
+		.chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-top: 18px;
+		}
+
+		.chip {
+			padding: 9px 14px;
+			border-radius: 999px;
+			font-size: 14px;
+			border: 1px solid rgba(29, 42, 47, 0.12);
+			background: rgba(255, 255, 255, 0.78);
+		}
+
+		.board {
+			display: grid;
+			grid-template-columns: 1.06fr 1.4fr;
+			gap: 22px;
+			margin-top: 24px;
+			align-items: start;
+		}
+
+		.panel {
+			padding: 22px;
+			background: var(--panel);
+			border: 2px solid rgba(29, 42, 47, 0.12);
+			border-radius: var(--radius);
+			box-shadow: var(--shadow);
+			position: relative;
+			overflow: hidden;
+		}
+
+		.panel::after {
+			content: "";
+			position: absolute;
+			inset: auto -35% -65% auto;
+			width: 240px;
+			height: 240px;
+			border-radius: 50%;
+			background: radial-gradient(circle, rgba(184, 76, 42, 0.10), transparent 70%);
+			pointer-events: none;
+		}
+
+		.panel-title {
+			display: flex;
+			justify-content: space-between;
+			align-items: baseline;
+			gap: 12px;
+			margin-bottom: 18px;
+		}
+
+		.panel-title h2 {
+			margin: 0;
+			font-size: 24px;
+			letter-spacing: 0.04em;
+		}
+
+		.panel-title span {
+			color: var(--muted);
+			font-size: 14px;
+		}
+
+		.phase-list {
+			display: grid;
+			gap: 18px;
+			position: relative;
+			padding-left: 18px;
+		}
+
+		.phase-list::before {
+			content: "";
+			position: absolute;
+			left: 12px;
+			top: 4px;
+			bottom: 4px;
+			width: 2px;
+			background: linear-gradient(180deg, var(--accent), rgba(63, 108, 123, 0.55));
+		}
+
+		.phase {
+			position: relative;
+			margin-left: 14px;
+			padding: 18px 18px 18px 20px;
+			border-radius: 18px;
+			border: 1px solid rgba(29, 42, 47, 0.12);
+			background: rgba(255, 255, 255, 0.72);
+		}
+
+		.phase::before {
+			content: "";
+			position: absolute;
+			left: -27px;
+			top: 24px;
+			width: 14px;
+			height: 14px;
+			border-radius: 50%;
+			background: var(--accent);
+			border: 3px solid #fff6ef;
+			box-shadow: 0 0 0 2px rgba(184, 76, 42, 0.18);
+		}
+
+		.phase h3 {
+			margin: 0 0 6px;
+			font-size: 18px;
+		}
+
+		.phase .method {
+			display: inline-block;
+			margin-bottom: 10px;
+			padding: 4px 10px;
+			border-radius: 999px;
+			background: rgba(63, 108, 123, 0.10);
+			color: var(--blue);
+			font-size: 13px;
+		}
+
+		.mini-flow {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 8px;
+			margin-top: 10px;
+		}
+
+		.mini-node,
+		.mini-arrow {
+			font-size: 13px;
+			line-height: 1.4;
+		}
+
+		.mini-node {
+			padding: 8px 10px;
+			border-radius: 12px;
+			background: #fffdf9;
+			border: 1px solid rgba(29, 42, 47, 0.12);
+		}
+
+		.mini-arrow {
+			color: var(--muted);
+			font-weight: 700;
+		}
+
+		.phase p,
+		.notes li,
+		.mapping-card p,
+		.mapping-card li,
+		.step p,
+		.subcard p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 14px;
+			line-height: 1.7;
+		}
+
+		.notes {
+			margin: 14px 0 0;
+			padding-left: 18px;
+		}
+
+		.notes li + li {
+			margin-top: 6px;
+		}
+
+		.flow-stack {
+			display: grid;
+			gap: 12px;
+			max-width: 780px;
+			margin: 0 auto;
+		}
+
+		.arrow-down {
+			width: 2px;
+			height: 28px;
+			margin: 0 auto;
+			background: linear-gradient(180deg, rgba(29, 42, 47, 0.30), rgba(184, 76, 42, 0.85));
+			position: relative;
+		}
+
+		.arrow-down::after {
+			content: "";
+			position: absolute;
+			left: 50%;
+			bottom: -7px;
+			transform: translateX(-50%);
+			border-left: 7px solid transparent;
+			border-right: 7px solid transparent;
+			border-top: 10px solid var(--accent);
+		}
+
+		.step {
+			padding: 18px;
+			border-radius: 20px;
+			border: 1px solid rgba(29, 42, 47, 0.12);
+			background: rgba(255, 255, 255, 0.78);
+			position: relative;
+			box-shadow: 0 10px 24px rgba(35, 32, 28, 0.06);
+		}
+
+		.step h3 {
+			margin: 0 0 8px;
+			font-size: 19px;
+		}
+
+		.step small,
+		.subcard small {
+			display: inline-block;
+			margin-top: 4px;
+			color: var(--blue);
+			font-size: 12px;
+			letter-spacing: 0.04em;
+		}
+
+		.step.input { border-left: 8px solid var(--blue); }
+		.step.core { border-left: 8px solid var(--accent); }
+		.step.feature { border-left: 8px solid var(--green); }
+		.step.output { border-left: 8px solid var(--gold); }
+
+		.subgrid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.subcard {
+			padding: 14px;
+			border-radius: 16px;
+			border: 1px solid rgba(29, 42, 47, 0.12);
+			background: rgba(246, 241, 232, 0.78);
+		}
+
+		.subcard h4 {
+			margin: 0 0 6px;
+			font-size: 16px;
+		}
+
+		.triple {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.triple .subcard {
+			background: rgba(255, 253, 249, 0.85);
+		}
+
+		.callout {
+			margin-top: 14px;
+			padding: 12px 14px;
+			border-radius: 14px;
+			background: rgba(184, 76, 42, 0.08);
+			color: var(--ink);
+			border: 1px dashed rgba(184, 76, 42, 0.34);
+			font-size: 14px;
+			line-height: 1.7;
+		}
+
+		.mapping {
+			margin-top: 24px;
+			padding: 22px;
+			border-radius: var(--radius);
+			background: linear-gradient(180deg, rgba(255, 252, 247, 0.95), rgba(247, 241, 233, 0.92));
+			border: 2px solid rgba(29, 42, 47, 0.12);
+			box-shadow: var(--shadow);
+		}
+
+		.mapping h2 {
+			margin: 0 0 16px;
+			font-size: 24px;
+		}
+
+		.mapping-grid {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 14px;
+		}
+
+		.mapping-card {
+			padding: 16px;
+			border-radius: 18px;
+			background: rgba(255, 255, 255, 0.76);
+			border: 1px solid rgba(29, 42, 47, 0.12);
+		}
+
+		.mapping-card h3 {
+			margin: 0 0 8px;
+			font-size: 17px;
+		}
+
+		.mapping-card ul {
+			margin: 12px 0 0;
+			padding-left: 18px;
+		}
+
+		.mapping-card li + li {
+			margin-top: 6px;
+		}
+
+		.footer-note {
+			margin-top: 16px;
+			padding-top: 12px;
+			border-top: 1px dashed rgba(29, 42, 47, 0.16);
+			color: var(--muted);
+			font-size: 14px;
+			line-height: 1.8;
+		}
+
+		@media (max-width: 1180px) {
+			.board,
+			.mapping-grid {
+				grid-template-columns: 1fr;
+			}
+		}
+
+		@media (max-width: 760px) {
+			.page {
+				padding: 18px 12px 28px;
+			}
+
+			.hero,
+			.panel,
+			.mapping {
+				padding: 18px;
+			}
+
+			.subgrid,
+			.triple {
+				grid-template-columns: 1fr;
+			}
+
+			.hero-top {
+				align-items: flex-start;
+			}
+		}
+	</style>
+</head>
+<body>
+	<div class="page">
+		<section class="hero">
+			<div class="hero-top">
+				<span class="tag">ICFIE-YOLO / 论文复现流程图</span>
+				<span class="tag">HTML 自包含，无外部依赖</span>
+			</div>
+			<h1>基于 ICFIE-YOLO 的低照度目标检测算法流程图</h1>
+			<p>
+				这张图把论文方法压缩成后续 Python 实现可直接对齐的模块粒度：训练阶段分为预训练检测器、冻结检测器训练 MSICN、再联合微调；推理阶段按
+				Input → MSICN → YOLOv7 Backbone/Neck → FIE → Detect/NMS 的执行顺序展开。
+			</p>
+			<div class="chips">
+				<span class="chip">核心模块：MSICN = IFE + GIC + LIC + NLIS</span>
+				<span class="chip">增强模块：FIE = Spatial Branch + Channel Branch + Concat</span>
+				<span class="chip">训练约束：仅用 Detection Loss 对齐优化方向</span>
+				<span class="chip">实现建议：模块名即类名或 forward 子过程名</span>
+			</div>
+		</section>
+
+		<section class="board">
+			<article class="panel">
+				<div class="panel-title">
+					<h2>训练阶段</h2>
+					<span>Train Pipeline / 对齐论文 3.4 节</span>
+				</div>
+
+				<div class="phase-list">
+					<section class="phase">
+						<h3>Phase A：预训练正常照度检测器</h3>
+						<span class="method">train_detector_on_normal_light()</span>
+						<p>使用正常照度数据集训练 YOLOv7 检测器，得到具备正常光照特征提取能力的检测器参数 θ_det。</p>
+						<div class="mini-flow">
+							<span class="mini-node">IMG_H + labels</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">YOLOv7 Backbone + Neck + Detect</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Loss_H / θ_det</span>
+						</div>
+					</section>
+
+					<section class="phase">
+						<h3>Phase B：冻结检测器，仅训练 MSICN</h3>
+						<span class="method">freeze_detector(); train_msicn_with_det_loss()</span>
+						<p>将低照度图像先送入 MSICN，再输入冻结的检测器；反向传播时仅更新 θ_msicn，使光照矫正完全朝检测精度提升方向优化。</p>
+						<div class="mini-flow">
+							<span class="mini-node">IMG_L + labels</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">MSICN</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Frozen Detector</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Loss_C 只回传到 MSICN</span>
+						</div>
+						<ul class="notes">
+							<li>目标不是生成“视觉更好看”的图像，而是生成“更利于检测”的矫正结果。</li>
+							<li>这里不依赖成对正常照度/低照度目标检测数据。</li>
+						</ul>
+					</section>
+
+					<section class="phase">
+						<h3>Phase C：解冻全模型联合微调</h3>
+						<span class="method">finetune_icfie_yolo_end_to_end()</span>
+						<p>MSICN 学到初步光照矫正关系后，解冻检测器与 FIE，进行端到端联合微调，得到最终 ICFIE-YOLO 权重。</p>
+						<div class="mini-flow">
+							<span class="mini-node">MSICN</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">YOLOv7 Backbone/Neck</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">FIE</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Detect + Loss</span>
+						</div>
+					</section>
+				</div>
+			</article>
+
+			<article class="panel">
+				<div class="panel-title">
+					<h2>推理阶段</h2>
+					<span>Inference Pipeline / 对齐论文 3.1 ~ 3.3 节</span>
+				</div>
+
+				<div class="flow-stack">
+					<section class="step input">
+						<h3>1. 输入低照度图像</h3>
+						<p>输入张量通常为 x ∈ R[B, 3, H, W]，先归一化到 [0, 1]，后续 MSICN 与检测器均基于该范围工作。</p>
+						<small>forward(x)</small>
+					</section>
+
+					<div class="arrow-down"></div>
+
+					<section class="step core">
+						<h3>2. MSICN 光照矫正</h3>
+						<p>先提取光照特征，再分别估计全局与局部光照矫正参数，最后通过 NLIS 对输入图像做多次非线性光照堆叠，输出更利于检测的矫正图像。</p>
+						<div class="subgrid">
+							<section class="subcard">
+								<h4>IFE</h4>
+								<p>多层 3×3 卷积提取多尺度光照特征，并拼接不同感受野特征。</p>
+								<small>IlluminationFeatureExtraction</small>
+							</section>
+							<section class="subcard">
+								<h4>GIC</h4>
+								<p>预测全局光照系数 k，分别修正 RGB 三通道的全局亮度与色调。</p>
+								<small>GlobalIlluminationCorrection</small>
+							</section>
+							<section class="subcard">
+								<h4>LIC</h4>
+								<p>预测 10 组局部矫正系数 K1...K10，拟合复杂局部光源与不均匀照明。</p>
+								<small>LocalIlluminationCorrection</small>
+							</section>
+							<section class="subcard">
+								<h4>NLIS</h4>
+								<p>按论文式(1)(2)执行全局曲线矫正与 10 次局部非线性堆叠，得到 x_corr。</p>
+								<small>NonLinearIlluminationStacking</small>
+							</section>
+						</div>
+						<div class="callout">建议 Python 对齐：x_corr = self.msicn(x)，其中 msicn.forward 内部固定为 ife → (gic, lic) → nlis。</div>
+					</section>
+
+					<div class="arrow-down"></div>
+
+					<section class="step feature">
+						<h3>3. YOLOv7 Backbone + Neck 特征提取</h3>
+						<p>将矫正后的图像送入主干与颈部网络，输出多尺度特征图 P3、P4、P5，为后续 FIE 和检测头提供基础特征。</p>
+						<div class="triple">
+							<section class="subcard">
+								<h4>P3</h4>
+								<p>高分辨率特征，偏向小目标。</p>
+								<small>feat_small</small>
+							</section>
+							<section class="subcard">
+								<h4>P4</h4>
+								<p>中尺度特征，兼顾局部与语义。</p>
+								<small>feat_medium</small>
+							</section>
+							<section class="subcard">
+								<h4>P5</h4>
+								<p>高语义特征，偏向大目标。</p>
+								<small>feat_large</small>
+							</section>
+						</div>
+					</section>
+
+					<div class="arrow-down"></div>
+
+					<section class="step feature">
+						<h3>4. FIE 特征交互增强</h3>
+						<p>对每个尺度特征分别执行空间交互增强和通道交互增强，最后与原始特征按通道拼接，抑制噪声并强化目标特征。</p>
+						<div class="subgrid">
+							<section class="subcard">
+								<h4>Spatial Branch</h4>
+								<p>通过 q·cᵀ 建立像素间空间关联，突出目标区域、压制背景噪声。</p>
+								<small>spatial_interaction_branch()</small>
+							</section>
+							<section class="subcard">
+								<h4>Channel Branch</h4>
+								<p>通过 yᵀ·p 建立通道语义关联。<strong>(注：输出前需上采样恢复原分辨率以对齐张量)</strong></p>
+								<small>channel_interaction_branch()</small>
+							</section>
+						</div>
+						<div class="callout">建议 Python 对齐：feat_out = torch.cat([feat, f_s, f_c], dim=1)，并在 P3/P4/P5 上各放置一个 FIE 模块。</div>
+					</section>
+
+					<div class="arrow-down"></div>
+
+					<section class="step output">
+						<h3>5. Detect Head + NMS 输出结果</h3>
+						<p>增强后的多尺度特征进入检测头，完成分类与边框回归；推理时经 NMS 输出最终目标框、类别与置信度。</p>
+						<div class="mini-flow">
+							<span class="mini-node">FIE(P3/P4/P5)</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Detect Head</span>
+							<span class="mini-arrow">→</span>
+							<span class="mini-node">Boxes / Scores / Labels</span>
+						</div>
+					</section>
+				</div>
+			</article>
+		</section>
+
+		<section class="mapping">
+			<h2>后续 Python 实现对齐建议</h2>
+			<div class="mapping-grid">
+			<article class="mapping-card">
+					<h3>顶层模型（串联层）</h3>
+					<p><code>icfie_yolo.py</code> — <code>ICFIEYOLO</code> ，四层模块均由外部注入，本文件只做串联。</p>
+					<ul>
+						<li>self.msicn &nbsp;←&nbsp; msicn.py</li>
+						<li>self.backbone_neck &nbsp;←&nbsp; yolo_wrapper.py</li>
+						<li>self.fie &nbsp;←&nbsp; fie.py</li>
+						<li>self.detect_head &nbsp;←&nbsp; detect.py</li>
+					</ul>
+				</article>
+
+				<article class="mapping-card">
+					<h3>MSICN 内部</h3>
+					<p>把论文结构保持成独立子模块，后面做消融实验时会更方便。</p>
+					<ul>
+						<li>IFE: 提取公用光照特征</li>
+						<li>GIC: 输出全局系数 k</li>
+						<li>LIC: 输出局部系数组 K1...K10</li>
+						<li>NLIS: 按公式执行矫正，不放可训练参数</li>
+					</ul>
+				</article>
+
+				<article class="mapping-card">
+					<h3>训练脚本</h3>
+					<p><code>train.py</code> 已实现三阶段显式控制，冻结通过 <code>requires_grad</code> 遍历实现。</p>
+					<ul>
+						<li>apply_training_stage(model, STAGE_B)</li>
+						<li>apply_training_stage(model, STAGE_C)</li>
+						<li>forward_for_stage() — 阶段B用no_grad包裹冻结层</li>
+						<li>ablation_switches: enable_msicn / enable_fie</li>
+					</ul>
+				</article>
+			</div>
+			<div class="footer-note">
+				如果后续你要我继续写 Python 代码，这个 HTML 已经按“模块边界”和“forward 顺序”拆好了，后面可以直接一段一段按图实现，而不是再从论文里重新拆结构。
+			</div>
+		</section>
+	</div>
+</body>
+</html>

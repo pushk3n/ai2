@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICFIE-YOLO 算法流程图</title>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --text: #1e293b;
+            --text-secondary: #475569;
+            --input-output-bg: #dbeafe;
+            --input-output-border: #3b82f6;
+            --input-output-text: #1e40af;
+            --msicn-bg: #dcfce7;
+            --msicn-border: #22c55e;
+            --msicn-inner-bg: #f0fdf4;
+            --msicn-inner-border: #4ade80;
+            --backbone-bg: #fed7aa;
+            --backbone-border: #f97316;
+            --backbone-text: #9a3412;
+            --fie-bg: #e9d5ff;
+            --fie-border: #a855f7;
+            --fie-inner-bg: #faf5ff;
+            --fie-inner-border: #c084fc;
+            --arrow-color: #64748b;
+            --connector-color: #94a3b8;
+            --highlight: #ef4444;
+            --tag-bg: #fef3c7;
+            --tag-text: #92400e;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+            --radius-sm: 6px;
+            --radius: 10px;
+            --radius-lg: 14px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+            background: #f1f5f9;
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            padding: 30px 16px 60px;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .flowchart-container {
+            width: 100%;
+            max-width: 920px;
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: var(--shadow-lg);
+            padding: 36px 28px 40px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .flowchart-title {
+            text-align: center;
+            font-size: 1.55rem;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 6px;
+            letter-spacing: 0.3px;
+        }
+        .flowchart-subtitle {
+            text-align: center;
+            font-size: 0.875rem;
+            color: #64748b;
+            margin-bottom: 30px;
+            font-weight: 400;
+        }
+
+        /* ===== 通用模块样式 ===== */
+        .module {
+            border-radius: var(--radius);
+            padding: 16px 20px;
+            box-shadow: var(--shadow);
+            position: relative;
+            transition: box-shadow 0.2s;
+        }
+        .module:hover {
+            box-shadow: var(--shadow-lg);
+        }
+        .module-label {
+            font-weight: 700;
+            font-size: 0.95rem;
+            margin-bottom: 8px;
+            letter-spacing: 0.2px;
+        }
+        .module-desc {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .module-dims {
+            display: inline-block;
+            background: #f1f5f9;
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #334155;
+            margin: 2px 1px;
+            letter-spacing: 0.3px;
+            font-family: "SF Mono", "Cascadia Code", "Consolas", "Menlo", monospace;
+        }
+
+        /* ===== 输入/输出 ===== */
+        .io-module {
+            background: var(--input-output-bg);
+            border: 2.5px solid var(--input-output-border);
+            text-align: center;
+        }
+        .io-module .module-label {
+            color: var(--input-output-text);
+            font-size: 1rem;
+        }
+
+        /* ===== MSICN ===== */
+        .msicn-outer {
+            background: var(--msicn-bg);
+            border: 3px solid var(--msicn-border);
+            border-radius: var(--radius-lg);
+            padding: 18px 16px 14px;
+            box-shadow: var(--shadow);
+            position: relative;
+        }
+        .msicn-outer>.module-label {
+            color: #166534;
+            font-size: 1.05rem;
+            margin-bottom: 12px;
+            text-align: center;
+        }
+        .msicn-inner {
+            background: var(--msicn-inner-bg);
+            border: 2px dashed var(--msicn-inner-border);
+            border-radius: var(--radius-sm);
+            padding: 12px 14px;
+            margin-bottom: 8px;
+        }
+        .msicn-inner .module-label {
+            color: #15803d;
+            font-size: 0.85rem;
+        }
+        .msicn-parallel {
+            display: flex;
+            gap: 14px;
+            margin: 8px 0;
+        }
+        .msicn-parallel>.msicn-inner {
+            flex: 1;
+            margin-bottom: 0;
+        }
+        .msicn-sub {
+            background: #fefce8;
+            border: 1.5px solid #fde68a;
+            border-radius: var(--radius-sm);
+            padding: 10px 12px;
+            margin-top: 6px;
+            font-size: 0.78rem;
+        }
+        .msicn-sub .module-label {
+            color: #a16207;
+            font-size: 0.8rem;
+        }
+
+        /* ===== Backbone ===== */
+        .backbone-module {
+            background: var(--backbone-bg);
+            border: 2.5px solid var(--backbone-border);
+            text-align: center;
+            border-radius: var(--radius);
+            padding: 18px 20px;
+            box-shadow: var(--shadow);
+        }
+        .backbone-module .module-label {
+            color: var(--backbone-text);
+            font-size: 1rem;
+        }
+
+        /* ===== FIE ===== */
+        .fie-outer {
+            background: var(--fie-bg);
+            border: 3px solid var(--fie-border);
+            border-radius: var(--radius-lg);
+            padding: 18px 16px 14px;
+            box-shadow: var(--shadow);
+            position: relative;
+        }
+        .fie-outer>.module-label {
+            color: #6b21a8;
+            font-size: 1.05rem;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .fie-branches {
+            display: flex;
+            gap: 16px;
+        }
+        .fie-branch {
+            flex: 1;
+            background: var(--fie-inner-bg);
+            border: 2px dashed var(--fie-inner-border);
+            border-radius: var(--radius-sm);
+            padding: 12px 14px;
+        }
+        .fie-branch .module-label {
+            color: #7c3aed;
+            font-size: 0.85rem;
+        }
+        .fie-merge {
+            background: #fefce8;
+            border: 2px solid #eab308;
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            margin-top: 10px;
+            text-align: center;
+            font-weight: 600;
+            color: #854d0e;
+            font-size: 0.85rem;
+        }
+
+        /* ===== 箭头连接器 ===== */
+        .arrow-down {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 4px 0;
+            position: relative;
+        }
+        .arrow-down-line {
+            width: 2.5px;
+            height: 22px;
+            background: var(--arrow-color);
+            border-radius: 2px;
+        }
+        .arrow-down-head {
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-top: 10px solid var(--arrow-color);
+            margin-top: -1px;
+        }
+        .arrow-label {
+            font-size: 0.7rem;
+            color: #64748b;
+            font-weight: 500;
+            white-space: nowrap;
+            margin: 1px 0;
+            text-align: center;
+            font-family: "SF Mono", "Cascadia Code", "Consolas", "Menlo", monospace;
+            letter-spacing: 0.2px;
+        }
+
+        /* 水平分叉箭头 */
+        .fork-connector {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0;
+            position: relative;
+            height: 28px;
+            margin: 2px 0;
+        }
+        .fork-connector .stem {
+            width: 2.5px;
+            height: 16px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        .fork-connector .bar {
+            width: 60%;
+            height: 2.5px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 14px;
+            left: 20%;
+        }
+        .fork-connector .leg-left,
+        .fork-connector .leg-right {
+            width: 2.5px;
+            height: 14px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 14px;
+        }
+        .fork-connector .leg-left {
+            left: 20%;
+        }
+        .fork-connector .leg-right {
+            right: 20%;
+        }
+        .fork-connector .head-left,
+        .fork-connector .head-right {
+            position: absolute;
+            top: 26px;
+            width: 0;
+            height: 0;
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-top: 9px solid var(--connector-color);
+        }
+        .fork-connector .head-left {
+            left: calc(20% - 5px);
+        }
+        .fork-connector .head-right {
+            right: calc(20% - 5px);
+        }
+
+        /* 汇聚箭头 */
+        .merge-connector {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0;
+            position: relative;
+            height: 28px;
+            margin: 2px 0;
+        }
+        .merge-connector .leg-left,
+        .merge-connector .leg-right {
+            width: 2.5px;
+            height: 14px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 0;
+        }
+        .merge-connector .leg-left {
+            left: 20%;
+        }
+        .merge-connector .leg-right {
+            right: 20%;
+        }
+        .merge-connector .bar {
+            width: 60%;
+            height: 2.5px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 12px;
+            left: 20%;
+        }
+        .merge-connector .stem {
+            width: 2.5px;
+            height: 16px;
+            background: var(--connector-color);
+            border-radius: 2px;
+            position: absolute;
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        .merge-connector .head-center {
+            position: absolute;
+            top: 26px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-top: 10px solid var(--connector-color);
+        }
+
+        /* ===== 标签徽章 ===== */
+        .badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 20px;
+            letter-spacing: 0.3px;
+            margin: 1px 2px;
+        }
+        .badge-green {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .badge-purple {
+            background: #e9d5ff;
+            color: #6b21a8;
+        }
+        .badge-orange {
+            background: #fed7aa;
+            color: #9a3412;
+        }
+        .badge-blue {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .badge-yellow {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 700px) {
+            .flowchart-container {
+                padding: 18px 10px 24px;
+            }
+            .msicn-parallel,
+            .fie-branches {
+                flex-direction: column;
+                gap: 8px;
+            }
+            .fork-connector,
+            .merge-connector {
+                display: none;
+            }
+            .module {
+                padding: 10px 12px;
+            }
+        }
+
+        /* ===== 打印样式 ===== */
+        @media print {
+            body {
+                background: #fff;
+                padding: 0;
+            }
+            .flowchart-container {
+                box-shadow: none;
+                border: 1px solid #ccc;
+                max-width: 100%;
+            }
+            .module:hover {
+                box-shadow: none;
+            }
+        }
+
+        /* ===== 图例 ===== */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 18px;
+            margin-top: 24px;
+            padding: 14px 16px;
+            background: #f8fafc;
+            border-radius: var(--radius-sm);
+            border: 1px solid #e2e8f0;
+            font-size: 0.75rem;
+            color: #475569;
+            justify-content: center;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-swatch {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            flex-shrink: 0;
+            border: 1.5px solid rgba(0, 0, 0, 0.15);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="flowchart-container">
+
+        <div class="flowchart-title">ICFIE-YOLO 算法推理流程图</div>
+        <div class="flowchart-subtitle">低照度图像目标检测 &mdash; 多尺度光照矫正 + 特征交互增强</div>
+
+        <div class="module io-module">
+            <div class="module-label">📥 低照度图像输入</div>
+            <div class="module-desc">
+                低照度/低亮度/光照不均图像 &nbsp;
+                <span class="module-dims">3 × H × W</span>
+                &nbsp;（如 416×416 或 640×640）
+            </div>
+        </div>
+
+        <div class="arrow-down">
+            <div class="arrow-down-line"></div>
+            <div class="arrow-down-head"></div>
+            <span class="arrow-label">原始低照度图像 I_in</span>
+        </div>
+
+        <div class="msicn-outer">
+            <div class="module-label">🔆 MSICN：多尺度光照矫正网络 <span class="badge badge-green">可训练</span></div>
+            <div class="module-desc" style="text-align:center;margin-bottom:10px;">
+                目标：矫正全局光照不足与局部光照不均，凸显黑暗背景中的目标特征。
+                <br>训练方式：<strong>基于检测损失的对齐训练</strong>（仅使用检测Loss反向传播，无需成对图像）
+            </div>
+
+            <div class="msicn-inner">
+                <div class="module-label">📐 IFE：光照特征提取模块</div>
+                <div class="module-desc">
+                    6个 <span class="module-dims">Conv 3×3, s=1</span> 堆叠 + ReLU激活
+                    <br>多层级感受野特征图在通道维度拼接 → 输出
+                    <span class="module-dims">32 ch × H × W</span> 光照特征
+                    <br><span style="color:#64748b;font-size:0.7rem;">（感受野从小→大，对应不同尺度的光照信息）</span>
+                </div>
+            </div>
+
+            <div class="fork-connector">
+                <div class="stem"></div>
+                <div class="bar"></div>
+                <div class="leg-left"></div>
+                <div class="leg-right"></div>
+                <div class="head-left"></div>
+                <div class="head-right"></div>
+            </div>
+            <span class="arrow-label" style="display:block;text-align:center;margin:-4px 0 2px;">光照特征（32ch）分两路</span>
+
+            <div class="msicn-parallel">
+                <div class="msicn-inner">
+                    <div class="module-label">🌍 GIC：全局光照矫正</div>
+                    <div class="module-desc">
+                        2个 <span class="module-dims">Conv 5×5, d=3</span> 空洞卷积
+                        <br>→ 全局平均池化 → <strong>Sigmoid</strong>
+                        <br>输出：<span class="module-dims">k (1×1×3)</span>，值域 <strong>(0, 1)</strong>
+                        <br><span style="color:#64748b;font-size:0.7rem;">大感受野捕获全局光照信息，3通道独立调整R/G/B</span>
+                    </div>
+                </div>
+                <div class="msicn-inner">
+                    <div class="module-label">💡 LIC：局部光照矫正</div>
+                    <div class="module-desc">
+                        <strong>非下采样分支：</strong>连续 <span class="module-dims">Conv 3×3</span>（小范围光源）
+                        <br><strong>下采样分支：</strong>更深层 + <span class="module-dims">AvgPool 3×3, s=1</span>（大范围光源）
+                        <br>输出：<span class="module-dims">30 ch × H × W</span>（10组×3通道）
+                        <br>激活：<strong>2·Sigmoid(x)−1</strong>，值域 <strong>(−1, 1)</strong>
+                        <br><span style="color:#64748b;font-size:0.7rem;">多尺度结构拟合不同范围和亮度的局部光源</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="merge-connector">
+                <div class="leg-left"></div>
+                <div class="leg-right"></div>
+                <div class="bar"></div>
+                <div class="stem"></div>
+                <div class="head-center"></div>
+            </div>
+            <span class="arrow-label" style="display:block;text-align:center;margin:-4px 0 2px;">全局系数 k + 局部系数(10组) 汇聚</span>
+
+            <div class="msicn-sub">
+                <div class="module-label">🔧 NLIS：非线性光照堆叠 <span class="badge badge-yellow">无参数</span></div>
+                <div class="module-desc">
+                    <strong>Step 1 — 全局矫正（公式1）：</strong>
+                    <br>&emsp;<span class="module-dims">I_g_out = I_in · (−k·I_in + (1+k))</span>，k∈(0,1)
+                    <br><strong>Step 2 — 局部矫正（公式2）：</strong>迭代10次
+                    <br>&emsp;<span class="module-dims">I_out_i = I_out_(i−1) · (k_i·I_out_(i−1) + (1−k_i))</span>，k_i∈(−1,1)
+                    <br>✅ 输出：<span class="module-dims">光照矫正图像 3 × H × W</span>（像素值始终在[0,1]）
+                    <br><span style="color:#64748b;font-size:0.7rem;">二次曲线堆叠 → 等价于高幂次调整曲线，拟合复杂光照</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="arrow-down">
+            <div class="arrow-down-line"></div>
+            <div class="arrow-down-head"></div>
+            <span class="arrow-label">光照矫正后图像 I_c（目标特征更显著）</span>
+        </div>
+
+        <div class="backbone-module">
+            <div class="module-label">🧠 YOLOv7 主干特征提取网络 <span class="badge badge-orange">预训练+微调</span></div>
+            <div class="module-desc">
+                对矫正图像进行多尺度特征提取
+                <br>输出3个尺度特征图（FPN/PAN结构）：
+                <br>🟠 <span class="module-dims">P3: 256 ch × (H/8)×(W/8)</span>
+                &nbsp; 🟠 <span class="module-dims">P4: 512 ch × (H/16)×(W/16)</span>
+                &nbsp; 🟠 <span class="module-dims">P5: 1024 ch × (H/32)×(W/32)</span>
+                <br><span style="color:#64748b;font-size:0.7rem;">使用MS COCO预训练权重初始化，后在低照度数据集微调</span>
+            </div>
+        </div>
+
+        <div class="arrow-down">
+            <div class="arrow-down-line"></div>
+            <div class="arrow-down-head"></div>
+            <span class="arrow-label">多尺度特征图（含噪声和背景特征）</span>
+        </div>
+
+        <div class="fie-outer">
+            <div class="module-label">🎯 FIE：特征交互增强检测头 <span class="badge badge-purple">可训练</span></div>
+            <div class="module-desc" style="text-align:center;margin-bottom:10px;">
+                目标：建立空间&语义关联，增强目标特征，抑制噪声和背景干扰。
+                <br>应用于<strong>P3/P4/P5</strong>三个尺度（每个尺度独立或共享参数处理）
+            </div>
+
+            <div class="fie-branches">
+                <div class="fie-branch">
+                    <div class="module-label">📏 空间特征交互增强分支</div>
+                    <div class="module-desc">
+                        <strong>3个并行 1×1 卷积：</strong>
+                        <br>&emsp;<span class="module-dims">b: C/2 ch</span>
+                        &ensp;<span class="module-dims">c: C/2 ch</span>
+                        &ensp;<span class="module-dims">d: C ch</span>
+                        <br>（通道减半 → 筛选重要特征）
+                        <br><br><strong>计算像素关联（公式3）：</strong>
+                        <br>&emsp;<span class="module-dims">q = Flatten(b)</span>
+                        &ensp;<span class="module-dims">c^T</span>
+                        <br>&emsp;<span class="module-dims">u = Softmax(q ⊗ c^T)</span>
+                        <br>&emsp;<span class="module-dims">u ∈ R^(WH×WH)</span> ← 像素间关联矩阵
+                        <br>&emsp;<span class="module-dims">f_s = Re(u ⊗ Flatten(d))</span>
+                        <br>✅ 输出：<span class="module-dims">f_s (C × H × W)</span>
+                        <br><span style="color:#64748b;font-size:0.7rem;">建立空间上下文关联，增强目标区域</span>
+                    </div>
+                </div>
+
+                <div class="fie-branch">
+                    <div class="module-label">🔗 通道特征交互增强分支</div>
+                    <div class="module-desc">
+                        <strong>3个并行 3×3 卷积（尺寸压缩）：</strong>
+                        <br>&emsp;<span class="module-dims">x: C ch × (H/2)×(W/2)</span>
+                        <br>&emsp;<span class="module-dims">y: C ch × (H/2)×(W/2)</span>
+                        <br>&emsp;<span class="module-dims">z: C ch × (H/2)×(W/2)</span>
+                        <br>（空间减半 → 筛选语义信息）
+                        <br><br><strong>计算通道关联（公式4）：</strong>
+                        <br>&emsp;<span class="module-dims">p = Flatten(x)</span>
+                        &ensp;<span class="module-dims">y^T</span>
+                        <br>&emsp;<span class="module-dims">n = Softmax(y^T ⊗ p)</span>
+                        <br>&emsp;<span class="module-dims">n ∈ R^(C×C)</span> ← 通道间关联矩阵
+                        <br>&emsp;<span class="module-dims">f_c_half = Re(Flatten(z) ⊗ n)</span>
+                        <br>&emsp;<span class="module-dims">f_c = Upsample(f_c_half)</span>
+                        <br>✅ 输出：<span class="module-dims">f_c (C × H × W)</span>
+                        <br><span style="color:#64748b;font-size:0.7rem;">建立通道语义关联（含上采样对齐尺寸操作）</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fie-merge">
+                🔀 特征拼接合并：<span class="module-dims">[f , f_s , f_c]</span> 沿通道维度拼接
+                <br>输入通道 C → 输出通道 <strong>3C</strong>（融合原始特征+空间增强+通道增强）
+                <br>↓ 送入分类头 & 回归头
+            </div>
+        </div>
+
+        <div class="arrow-down">
+            <div class="arrow-down-line"></div>
+            <div class="arrow-down-head"></div>
+            <span class="arrow-label">增强后的多尺度特征（噪声被抑制，目标特征被强化）</span>
+        </div>
+
+        <div class="module io-module">
+            <div class="module-label">📤 检测输出</div>
+            <div class="module-desc">
+                <strong>分类：</strong>目标类别预测 &nbsp;|&nbsp;
+                <strong>回归：</strong>边界框位置 (x, y, w, h) &nbsp;|&nbsp;
+                <strong>置信度：</strong>目标性得分
+                <br>最终经过NMS后处理输出检测结果
+            </div>
+        </div>
+
+        <div class="legend">
+            <span style="font-weight:600;color:#0f172a;">图例：</span>
+            <div class="legend-item">
+                <div class="legend-swatch" style="background:#dbeafe;border-color:#3b82f6;"></div> 输入/输出
+            </div>
+            <div class="legend-item">
+                <div class="legend-swatch" style="background:#dcfce7;border-color:#22c55e;"></div> 光照矫正(MSICN)
+            </div>
+            <div class="legend-item">
+                <div class="legend-swatch" style="background:#fed7aa;border-color:#f97316;"></div> 特征提取(Backbone)
+            </div>
+            <div class="legend-item">
+                <div class="legend-swatch" style="background:#e9d5ff;border-color:#a855f7;"></div> 特征增强(FIE)
+            </div>
+            <div class="legend-item">
+                <div class="legend-swatch" style="background:#fefce8;border-color:#eab308;"></div> 融合/堆叠操作
+            </div>
+            <div class="legend-item">
+                <span class="module-dims" style="font-size:0.7rem;">monospace</span> 张量维度
+            </div>
+        </div>
+
+        <div style="margin-top:16px;padding:12px 16px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:0.78rem;color:#92400e;line-height:1.6;">
+            <strong>💡 与Python代码对齐提示（四层文件拆分）：</strong>
+            <br>• <strong>文件对应关系：</strong>
+            <br>&emsp;① <code>msicn.py</code> → MSICN（含 IFE / GIC / LIC / NLIS）
+            <br>&emsp;② <code>yolo_wrapper.py</code> → YOLOv7 Backbone+Neck（<code>YOLOv7BackboneNeckAdapter</code> 生产 / <code>MockYOLOv7BackboneNeck</code> 冒烟测试）
+            <br>&emsp;③ <code>fie.py</code> → FIE 特征交互增强（<code>MultiScaleFIE</code>，含空间/通道双分支）
+            <br>&emsp;④ <code>detect.py</code> → Detect Head（<code>YOLOv7DetectHeadAdapter</code> 生产 / <code>MockYOLOv7DetectHead</code> 冒烟测试）
+            <br>&emsp;⑤ <code>icfie_yolo.py</code> → <code>ICFIEYOLO</code> 顶层串联适配器，本身不含业务逻辑
+            <br>• 训练流程：先冻结Backbone+DetectHead训练MSICN（仅检测Loss）→ 再解冻全模型端到端微调
+            <br>• 推理流程：Input → MSICN → YOLOv7_Backbone → FIE × 3尺度 → Detect_Head → NMS → Output
+            <br>• 关键公式对应：MSICN公式(1)(2)在NLIS中实现，FIE公式(3)(4)在空间/通道分支中实现
+            <br>• <strong>工程避坑：</strong> FIE 通道分支的 <code>z</code> 经过尺寸压缩，在最终 concat 前必须通过 <code>F.interpolate</code> 上采样至原特征尺寸。
+        </div>
+
+    </div>
+
+</body>
+</html>

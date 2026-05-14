@@ -5,6 +5,7 @@ import csv
 from contextlib import contextmanager
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -16,6 +17,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import torch
 import torch.distributed as dist
 import yaml
@@ -71,6 +74,10 @@ def configure_matplotlib_cjk_font() -> None:
 configure_matplotlib_cjk_font()
 
 
+SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+PNG_METADATA_KEYS_TO_STRIP = ("icc_profile", "chromaticity", "srgb", "gamma")
+
+
 @dataclass(frozen=True)
 class EpochMetric:
     stage: str
@@ -98,6 +105,16 @@ class BatchMetric:
     total_loss: float
     learning_rate: float
     elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    checkpoint_path: Path
+    stage: TrainingStage
+    epoch: int
+    optimizer_state: dict[str, object] | None = None
+    scheduler_state: dict[str, object] | None = None
+    scaler_state: dict[str, object] | None = None
 
 
 def stage_display_name(stage: TrainingStage) -> str:
@@ -334,11 +351,98 @@ def summarize_trainable_modules(model: ICFIEYOLO) -> str:
 
 
 def stage_order(stage: TrainingStage) -> int:
+    if stage == TrainingStage.STAGE_A:
+        return 1
     if stage == TrainingStage.STAGE_B:
         return 2
     if stage == TrainingStage.STAGE_C:
         return 3
-    return 1
+    return 0
+
+
+def parse_training_stage(value: str) -> TrainingStage:
+    try:
+        return TrainingStage(str(value))
+    except ValueError as exc:
+        raise ValueError(f"不支持的训练阶段: {value}") from exc
+
+
+def resolve_optional_runtime_path(raw_value: str | Path | None, *search_roots: Path) -> Path | None:
+    if raw_value is None:
+        return None
+
+    candidate = Path(str(raw_value)).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    for base_dir in search_roots:
+        resolved_path = (base_dir / candidate).resolve()
+        if resolved_path.exists():
+            return resolved_path
+
+    return (Path.cwd() / candidate).resolve()
+
+
+def find_latest_stage_checkpoint(run_dir: Path) -> Path:
+    checkpoint_pattern = re.compile(r"^(stage_[abc])_epoch_(\d+)\.pt$")
+    checkpoint_paths: list[tuple[int, int, Path]] = []
+
+    for checkpoint_path in run_dir.glob("stage_*_epoch_*.pt"):
+        match = checkpoint_pattern.match(checkpoint_path.name)
+        if match is None:
+            continue
+        stage = parse_training_stage(match.group(1))
+        epoch = int(match.group(2))
+        checkpoint_paths.append((stage_order(stage), epoch, checkpoint_path))
+
+    if not checkpoint_paths:
+        raise FileNotFoundError(f"未在运行目录中找到可续训 checkpoint: {run_dir}")
+
+    checkpoint_paths.sort(key=lambda item: (item[0], item[1]))
+    return checkpoint_paths[-1][2]
+
+
+def resolve_resume_checkpoint_path(
+    cli_resume: str | None,
+    config: TrainConfig,
+    *,
+    resolved_config_path: Path,
+) -> Path | None:
+    resume_target = cli_resume if cli_resume is not None else config.resume_from
+    if resume_target is None:
+        return None
+
+    if str(resume_target).strip().lower() == "auto":
+        return find_latest_stage_checkpoint(config.run_dir)
+
+    checkpoint_path = resolve_optional_runtime_path(
+        resume_target,
+        Path.cwd(),
+        PROJECT_ROOT,
+        resolved_config_path.parent,
+        config.run_dir,
+    )
+    if checkpoint_path is None or not checkpoint_path.exists():
+        raise FileNotFoundError(f"续训 checkpoint 不存在: {resume_target}")
+    return checkpoint_path
+
+
+def load_resume_state(checkpoint_path: Path, model: ICFIEYOLO) -> ResumeState:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "model" not in checkpoint:
+        raise KeyError(f"checkpoint 缺少 model 字段: {checkpoint_path}")
+
+    model.load_state_dict(checkpoint["model"], strict=True)
+    stage = parse_training_stage(checkpoint.get("stage", TrainingStage.STAGE_A.value))
+    epoch = int(checkpoint.get("epoch", 0) or 0)
+    return ResumeState(
+        checkpoint_path=checkpoint_path,
+        stage=stage,
+        epoch=epoch,
+        optimizer_state=checkpoint.get("optimizer"),
+        scheduler_state=checkpoint.get("scheduler"),
+        scaler_state=checkpoint.get("scaler"),
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -405,6 +509,91 @@ def cleanup_distributed() -> None:
 def build_dataloader_option(dataset_config: DatasetConfig) -> SimpleNamespace:
     # create_dataloader 只依赖 single_cls 这一项
     return SimpleNamespace(single_cls=dataset_config.single_cls)
+
+
+def resolve_dataset_image_paths(dataset_path: Path) -> list[Path]:
+    # 将 train.txt/val.txt 或图片目录解析为图像路径列表
+    if dataset_path.is_file() and dataset_path.suffix.lower() == ".txt":
+        image_paths: list[Path] = []
+        for raw_line in dataset_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            image_path = Path(line)
+            if not image_path.is_absolute():
+                image_path = (dataset_path.parent / image_path).resolve()
+            image_paths.append(image_path)
+        return image_paths
+
+    if dataset_path.is_dir():
+        return sorted(
+            path for path in dataset_path.rglob("*")
+            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        )
+
+    raise FileNotFoundError(f"不支持的数据集路径: {dataset_path}")
+
+
+def normalize_png_file(image_path: Path) -> bool:
+    # 仅当 PNG 包含可疑元数据时才重编码，避免训练启动阶段对全部 PNG 做无意义 IO
+    temp_path = image_path.with_name(f"{image_path.name}.tmp")
+    with Image.open(image_path) as image:
+        image.load()
+        if not any(key in image.info for key in PNG_METADATA_KEYS_TO_STRIP):
+            return False
+        normalized = image.convert("RGB")
+        normalized.save(temp_path, format="PNG", pnginfo=PngInfo())
+    temp_path.replace(image_path)
+    return True
+
+
+def maybe_normalize_dataset_pngs(config: TrainConfig, rank: int) -> None:
+    # 训练前统一清洗数据集中的 PNG，避免 libpng iCCP/cHRM 等底层解码异常
+    if not config.normalize_png_before_train:
+        return
+
+    if config.hardware.ddp and not is_main_process(rank):
+        dist.barrier()
+        return
+
+    dataset_paths = [config.dataset.train_path]
+    if config.dataset.val_path is not None:
+        dataset_paths.append(config.dataset.val_path)
+
+    seen_paths: set[Path] = set()
+    scanned_png = 0
+    normalized_png = 0
+    failed_png = 0
+
+    if is_main_process(rank):
+        print("[PNG 预处理 PNG Sanitize] 开始扫描训练集 PNG 元数据...")
+
+    for dataset_path in dataset_paths:
+        for image_path in resolve_dataset_image_paths(dataset_path):
+            resolved_path = image_path.resolve()
+            if resolved_path in seen_paths or resolved_path.suffix.lower() != ".png":
+                continue
+            seen_paths.add(resolved_path)
+            scanned_png += 1
+            try:
+                if normalize_png_file(resolved_path):
+                    normalized_png += 1
+            except Exception as exc:
+                failed_png += 1
+                print(f"[警告 Warning] PNG 训练前重编码失败: {resolved_path} ({exc})")
+
+            if is_main_process(rank) and scanned_png % 100 == 0:
+                print(
+                    f"[PNG 预处理 PNG Sanitize] scanned={scanned_png} | normalized={normalized_png} | failed={failed_png}"
+                )
+
+    if is_main_process(rank):
+        print(
+            f"[PNG 预处理 PNG Sanitize] scanned={scanned_png} | normalized={normalized_png} | failed={failed_png}"
+        )
+
+    if config.hardware.ddp:
+        dist.barrier()
 
 
 @contextmanager
@@ -587,6 +776,8 @@ def maybe_wrap_model(model: ICFIEYOLO, device: torch.device, hardware: HardwareC
 def save_checkpoint(
     model: nn.Module,
     optimizer: Adam,
+    scheduler: CosineAnnealingLR,
+    scaler: torch.amp.GradScaler,
     config: TrainConfig,
     stage: TrainingStage,
     epoch: int,
@@ -597,6 +788,8 @@ def save_checkpoint(
         "epoch": epoch + 1,
         "model": unwrap_model(model).state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict() if scaler.is_enabled() else None,
         "config": asdict(config),
     }
     torch.save(checkpoint, checkpoint_path)
@@ -612,6 +805,7 @@ def train_stage(
     device: torch.device,
     rank: int,
     world_size: int,
+    resume_state: ResumeState | None = None,
 ) -> None:
     if epochs == 0:
         if is_main_process(rank):
@@ -620,12 +814,46 @@ def train_stage(
 
     base_model = unwrap_model(model)
     apply_training_stage(base_model, stage)
+    start_epoch = 0
     optimizer = build_optimizer(base_model, config, stage)
-    scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1), eta_min=config.optimizer.min_lr)
+
+    if resume_state is not None:
+        if resume_state.stage != stage:
+            raise ValueError(
+                f"续训状态阶段不匹配: expected={stage.value} actual={resume_state.stage.value}"
+            )
+        start_epoch = resume_state.epoch
+        if resume_state.optimizer_state is not None:
+            optimizer.load_state_dict(resume_state.optimizer_state)
+
+    stage_base_lr = config.optimizer.lr_for_stage(stage)
+    for parameter_group in optimizer.param_groups:
+        parameter_group.setdefault("initial_lr", stage_base_lr)
+
+    if resume_state is not None and resume_state.scheduler_state is not None:
+        scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1), eta_min=config.optimizer.min_lr)
+        scheduler.load_state_dict(resume_state.scheduler_state)
+    else:
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=max(epochs, 1),
+            eta_min=config.optimizer.min_lr,
+            last_epoch=start_epoch - 1,
+        )
+
     # torch.cuda.amp.GradScaler 已废弃，改用 torch.amp.GradScaler
     scaler = torch.amp.GradScaler(device.type, enabled=config.hardware.use_amp and device.type == "cuda")
+    if resume_state is not None and resume_state.scaler_state is not None and scaler.is_enabled():
+        scaler.load_state_dict(resume_state.scaler_state)
     compute_loss = ComputeLossOTA(loss_owner) if config.use_ota_loss else ComputeLoss(loss_owner)
     accumulate_steps = max(config.hardware.accumulate_steps, 1)
+
+    if start_epoch >= epochs:
+        if is_main_process(rank):
+            print(
+                f"[跳过 Skip] {stage_display_name(stage)} | resume_epoch={start_epoch} 已达到当前配置 epochs={epochs}"
+            )
+        return
 
     if is_main_process(rank):
         current_lr = optimizer.param_groups[0]["lr"]
@@ -633,13 +861,17 @@ def train_stage(
             f"[开始 Start] {stage_display_name(stage)} | epochs={epochs} | batch_size={config.hardware.batch_size} "
             f"| accumulate={accumulate_steps} | lr={current_lr:.6g}"
         )
+        if resume_state is not None:
+            print(
+                f"[断点续训 Resume] stage={stage.value} | from={resume_state.checkpoint_path} | next_epoch={start_epoch + 1}"
+            )
         print(f"[阶段配置 Stage Setup] {summarize_trainable_modules(base_model)}")
         print(
             f"[可视化 Visualization] epoch_csv={metrics_csv_path(config.run_dir)} | batch_csv={batch_metrics_csv_path(config.run_dir)} "
             f"| png={metrics_plot_path(config.run_dir)} | interval={config.visualization.batch_log_interval}"
         )
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         epoch_start_time = time.perf_counter()
         if config.hardware.ddp and hasattr(dataloader, "sampler") and dataloader.sampler is not None:
             dataloader.sampler.set_epoch(epoch)
@@ -734,7 +966,7 @@ def train_stage(
 
         scheduler.step()
         if is_main_process(rank) and (epoch + 1) % max(config.save_every, 1) == 0:
-            save_checkpoint(model, optimizer, config, stage, epoch)
+            save_checkpoint(model, optimizer, scheduler, scaler, config, stage, epoch)
             print(
                 f"[检查点 Checkpoint] {stage_display_name(stage)} | saved={config.run_dir / f'{stage.value}_epoch_{epoch + 1}.pt'}"
             )
@@ -744,7 +976,7 @@ def save_stage_a_checkpoint(model: nn.Module, config: TrainConfig, rank: int) ->
     if not is_main_process(rank):
         return
     checkpoint_path = config.run_dir / "stage_a_loaded.pt"
-    torch.save({"stage": TrainingStage.STAGE_A.value, "model": unwrap_model(model).state_dict()}, checkpoint_path)
+    torch.save({"stage": TrainingStage.STAGE_A.value, "epoch": 0, "model": unwrap_model(model).state_dict()}, checkpoint_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -754,6 +986,13 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "configs" / "train.yaml",
         help="训练 YAML 配置文件路径",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="断点续训 checkpoint 路径；省略值时自动从 run_dir 选择最新 checkpoint",
     )
     return parser.parse_args()
 
@@ -782,20 +1021,29 @@ def main() -> None:
     resolved_config_path = resolve_cli_config_path(args.config, project_root=PROJECT_ROOT)
     config = load_train_config(resolved_config_path, project_root=PROJECT_ROOT)
     config.run_dir.mkdir(parents=True, exist_ok=True)
+    resume_checkpoint_path = resolve_resume_checkpoint_path(
+        args.resume,
+        config,
+        resolved_config_path=resolved_config_path,
+    )
 
     device, rank, _, world_size = init_distributed_mode(config.hardware)
     try:
-        if is_main_process(rank):
+        if is_main_process(rank) and resume_checkpoint_path is None:
             reset_visualization_artifacts(config.run_dir)
         set_seed(config.seed)
+        maybe_normalize_dataset_pngs(config, rank)
         hyp = load_hyperparameters(config)
         base_model, loss_owner, stride, class_names = build_model(config, device, hyp)
+        resume_state = load_resume_state(resume_checkpoint_path, base_model) if resume_checkpoint_path is not None else None
         model = maybe_wrap_model(base_model, device, config.hardware)
         dataloader, _, image_size = build_train_dataloader(config, hyp, stride, rank, world_size)
 
         if is_main_process(rank):
             print(f"[配置文件 Config] {resolved_config_path}")
             print(f"[训练配置 Train Setup] img_size={image_size} | classes={len(class_names)} | stride={stride}")
+            if resume_checkpoint_path is not None:
+                print(f"[续训 Checkpoint] {resume_checkpoint_path}")
             # 将 YAML 配置快照写入 run_dir  便于后续复现实验
             import shutil
             shutil.copy2(resolved_config_path, config.run_dir / "train_config_snapshot.yaml")
@@ -803,41 +1051,34 @@ def main() -> None:
 
         # 阶段 A: 预训练 backbone + detect head（纯 YOLO，不经过 MSICN/FIE）
         # 保存初始权重快照（yolov7.pt 迁移状态，阶段 A 训练前）
-        save_stage_a_checkpoint(model, config, rank)
-        train_stage(
-            model=model,
-            loss_owner=loss_owner,
-            dataloader=dataloader,
-            config=config,
-            stage=TrainingStage.STAGE_A,
-            epochs=config.schedule.stage_a_epochs,
-            device=device,
-            rank=rank,
-            world_size=world_size,
-        )
+        if resume_state is None:
+            save_stage_a_checkpoint(model, config, rank)
 
-        train_stage(
-            model=model,
-            loss_owner=loss_owner,
-            dataloader=dataloader,
-            config=config,
-            stage=TrainingStage.STAGE_B,
-            epochs=config.schedule.stage_b_epochs,
-            device=device,
-            rank=rank,
-            world_size=world_size,
+        stage_plan = (
+            (TrainingStage.STAGE_A, config.schedule.stage_a_epochs),
+            (TrainingStage.STAGE_B, config.schedule.stage_b_epochs),
+            (TrainingStage.STAGE_C, config.schedule.stage_c_epochs),
         )
-        train_stage(
-            model=model,
-            loss_owner=loss_owner,
-            dataloader=dataloader,
-            config=config,
-            stage=TrainingStage.STAGE_C,
-            epochs=config.schedule.stage_c_epochs,
-            device=device,
-            rank=rank,
-            world_size=world_size,
-        )
+        resume_stage_order = stage_order(resume_state.stage) if resume_state is not None else 0
+
+        for stage, epochs in stage_plan:
+            if resume_state is not None and stage_order(stage) < resume_stage_order:
+                if is_main_process(rank):
+                    print(f"[跳过 Skip] {stage_display_name(stage)} | resumed_from={resume_state.stage.value}")
+                continue
+
+            train_stage(
+                model=model,
+                loss_owner=loss_owner,
+                dataloader=dataloader,
+                config=config,
+                stage=stage,
+                epochs=epochs,
+                device=device,
+                rank=rank,
+                world_size=world_size,
+                resume_state=resume_state if resume_state is not None and resume_state.stage == stage else None,
+            )
     finally:
         cleanup_distributed()
 

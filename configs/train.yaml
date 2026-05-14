@@ -1,7 +1,8 @@
 seed: 42
-run_dir: runs/icfie_yolo-5-13-a5-b5-c5
+run_dir: runs/icfie_yolo-5-13-a1-b1-c1
 hyp_path: yolov7/data/hyp.scratch.p5.yaml
 project_after_fusion: true
+normalize_png_before_train: true
 save_every: 1
 use_ota_loss: false
 cache_images: false
@@ -53,6 +54,7 @@ hardware:
   ddp: false
   use_grad_checkpoint: true
 optimizer:
+  stage_a_lr: 0.0001
   lr: 0.01
   stage_c_lr: 0.0001
   min_lr: 1.0e-05
@@ -60,8 +62,8 @@ optimizer:
   beta1: 0.937
   beta2: 0.999
 schedule:
-  stage_a_epochs: 5
-  stage_b_epochs: 5
-  stage_c_epochs: 5
+  stage_a_epochs: 1
+  stage_b_epochs: 1
+  stage_c_epochs: 1
 visualization:
   batch_log_interval: 25

@@ -113,10 +113,14 @@ ICFIE-YOLO 的训练实际包含一个初始化快照步骤和三个训练阶段
 | `run_dir` | `runs/icfie_yolo-5-13` | 训练产物保存目录 |
 | `hyp_path` | `yolov7/data/hyp.scratch.p5.yaml` | YOLOv7 损失函数超参文件（含 anchor、损失权重等） |
 | `project_after_fusion` | `true` | FIE 输出是否经 1×1 Conv 投影回原始通道数（对接标准检测头） |
+| `resume_from` | `null` | 断点续训 checkpoint 路径；为 `null` 时默认从头训练 |
+| `normalize_png_before_train` | `true` | 训练启动前是否按需清洗带异常元数据的 PNG，规避 libpng 崩溃 |
 | `save_every` | 1 | 每隔 N 个 epoch 保存一次检查点 |
 | `use_ota_loss` | `false` | 是否使用 YOLOv7 OTA（最优传输分配）损失 |
 | `cache_images` | `false` | 是否缓存图像到内存 |
 | `rect` | `false` | 是否使用矩形推理（按长宽比分 batch） |
+
+`normalize_png_before_train=true` 时，训练入口会在创建 DataLoader 前扫描 `train_path/val_path` 中引用到的 PNG，只有当文件含有 `icc_profile/chromaticity/srgb/gamma` 等可疑元数据时才执行重编码，并在终端打印处理进度。
 
 ### 3.2 数据集参数（`dataset`）
 
@@ -154,6 +158,7 @@ ICFIE-YOLO 的训练实际包含一个初始化快照步骤和三个训练阶段
 
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
+| `stage_a_lr` | 0.0001 | 阶段 A 的初始学习率；用于纯 YOLO 基线训练，默认采用保守值避免破坏预训练 backbone |
 | `lr` | 0.01 | Adam 初始学习率，用于阶段 A 和阶段 B |
 | `stage_c_lr` | 0.0001 | 阶段 C 的初始学习率（全模型微调，应较小） |
 | `min_lr` | 0.00001 | CosineAnnealingLR 退火终点学习率 |
@@ -162,6 +167,11 @@ ICFIE-YOLO 的训练实际包含一个初始化快照步骤和三个训练阶段
 | `beta2` | 0.999 | Adam 二阶矩参数 |
 
 调度策略：每个阶段内使用 **CosineAnnealingLR**，从 `lr`（或 `stage_c_lr`）余弦衰减到 `min_lr`。
+
+说明：
+
+- 阶段 A 当前默认使用 `stage_a_lr=1e-4`，原因是直接用 `1e-2` 级别学习率去微调整个 YOLOv7 backbone，极易在第一轮就把特征分布训塌，表现为不同输入得到几乎相同的 P3/P4/P5 特征图与极低的 objectness 分数。
+- 阶段 B 仍沿用 `lr`，因为此时只训练 MSICN，参数规模小且不会直接破坏预训练 backbone。
 
 ### 3.6 训练阶段轮数（`schedule`）
 
@@ -236,13 +246,18 @@ FIE 对 3 个尺度（P3/P4/P5）分别独立应用，每个尺度含空间分�
 | 文件 | 含义 |
 |------|------|
 | `stage_a_loaded.pt` | 初始化快照，即加载完 `yolov7.pt` 后尚未开始训练时的完整模型状态 |
-| `stage_a_epoch_N.pt` | 阶段 A 第 N 个 epoch 结束时的纯 YOLO 基线检查点 |
-| `stage_b_epoch_N.pt` | 阶段 B 第 N 个 epoch 结束时的检查点 |
-| `stage_c_epoch_N.pt` | 阶段 C 第 N 个 epoch 结束时的检查点 |
+| `stage_a_epoch_N.pt` | 阶段 A 第 N 个 epoch 结束时的纯 YOLO 基线检查点，含模型/优化器/调度器状态 |
+| `stage_b_epoch_N.pt` | 阶段 B 第 N 个 epoch 结束时的检查点，含模型/优化器/调度器状态 |
+| `stage_c_epoch_N.pt` | 阶段 C 第 N 个 epoch 结束时的检查点，含模型/优化器/调度器状态 |
 | `training_metrics.csv` | 每个 epoch 的四项损失 + 学习率 + 耗时 |
 | `training_batch_metrics.csv` | batch 粒度的损失记录（每 `batch_log_interval` 个 batch 写一次） |
 | `training_metrics.png` | 训练过程可视化图（box/obj/cls/total 四图） |
 | `train_config_snapshot.yaml` | 本次训练的配置文件快照，便于后续复现 |
+
+补充说明：
+
+- `stage_a_loaded.pt` 只保存初始化模型权重，不包含真正训练过的 optimizer/scheduler 状态，更适合作为实验起点记录。
+- 真正用于断点续训的 checkpoint 应优先选择 `stage_a_epoch_N.pt`、`stage_b_epoch_N.pt` 或 `stage_c_epoch_N.pt`。
 
 ---
 
@@ -327,6 +342,38 @@ python test.py \
 cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
+
+### 断点续训
+
+训练入口支持两种断点续训方式。
+
+方式 1：命令行显式指定 checkpoint。
+
+```bash
+cd /home/pushk3n/github-ai2
+python src/train.py --config configs/train.yaml --resume runs/your_run_dir/stage_c_epoch_2.pt
+```
+
+方式 2：自动从当前 `run_dir` 中选择最新 checkpoint。
+
+```bash
+cd /home/pushk3n/github-ai2
+python src/train.py --config configs/train.yaml --resume
+```
+
+也可以在 YAML 顶层配置：
+
+```yaml
+resume_from: runs/your_run_dir/stage_c_epoch_2.pt
+```
+
+续训行为说明：
+
+1. `--resume` 优先级高于 YAML 中的 `resume_from`。
+2. `--resume` 不带路径时，会自动在 `run_dir` 中查找最新的 `stage_*_epoch_*.pt`。
+3. 续训时会恢复模型参数、优化器状态、学习率调度器状态以及 GradScaler 状态。
+4. 训练入口会根据 checkpoint 中记录的 `stage/epoch` 自动跳过已经完成的前置阶段，只从当前阶段的下一轮继续训练。
+5. 如果 checkpoint 中缺少优化器或调度器状态（例如 `stage_a_loaded.pt`），训练仍可启动，但会以当前配置重新初始化这些运行时状态。
 
 ### 多卡 DDP 训练（双 3090 等多卡环境）
 

@@ -53,10 +53,10 @@ from utils.general import non_max_suppression, scale_coords
 # 宏定义区: 需要测试哪张图  直接改这里
 # ================================================================
 
-TARGET_IMAGE_NAME = "light.png"
+TARGET_IMAGE_NAME = "mc.jpg"
 IMG_SIZE = 416
 DEVICE = "cpu"
-ENABLE_MSICN = False   # False: 跳过光照矫正  纯 YOLO baseline
+ENABLE_MSICN = True   # False: 跳过光照矫正  纯 YOLO baseline
 ENABLE_FIE = True     # False: 跳过特征增强  纯 YOLO baseline
 ENABLE_NMS: bool = True   # False: 跳过 NMS  不显示检测框
 CONF_THRES: float = 0.25
@@ -71,12 +71,12 @@ YOLO_WEIGHTS_PATH: Path | None = YOLOV7_ROOT / "yolov7.pt"  	# yolov7 官方预�
 #   ENABLE_FIE=False → 使用 Stage A checkpoint (纯 YOLO baseline，backbone+detect 无 FIE 预训练)
 # 若 FIE 禁用时仍加载 Stage C checkpoint，detect head 期望的是 FIE 输出特征分布，
 # 收到原始 backbone 特征后置信度全部偏低，NMS 将滤除所有框。
-ICFIE_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13" / "stage_c_epoch_3.pt"
+ICFIE_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13-a1-b1-c1" / "stage_c_epoch_1.pt"
 
 # 纯 YOLO 模式（ENABLE_FIE=False）专用 checkpoint
 # 重新训练后指向 stage_a_epoch_<N>.pt（Stage A 训练完成后生成）
 # 若设为 None 且 ENABLE_FIE=False，只保留 yolov7.pt 主干权重（检测头为随机初始化，12 类可能无法检出）
-YOLO_ONLY_CHECKPOINT_PATH: Path | None = None  # e.g. PROJECT_ROOT / "runs" / "icfie_yolo-5-13" / "stage_a_epoch_3.pt"
+YOLO_ONLY_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13-a1-b1-c1" / "stage_a_epoch_1.pt"
 
 YOLO_NUM_CLASSES: int | None = 12	# 这里需要与训练配置中的 dataset.num_classes 保持一致  否则会导致模型加载失败或推理错误
 
@@ -91,6 +91,13 @@ EXDARK_CLASS_NAMES: list[str] = [
 
 INPUT_DIR = PROJECT_ROOT / "test_sample"
 OUTPUT_DIR = PROJECT_ROOT / "results" / "single_image_pipeline"
+
+
+def build_output_stem(image_stem: str, enable_msicn: bool, enable_fie: bool) -> str:
+	# 输出文件名显式带上模块开关状态，便于对比不同组合的结果图
+	msicn_tag = "msicn_on" if enable_msicn else "msicn_off"
+	fie_tag = "fie_on" if enable_fie else "fie_off"
+	return f"{image_stem}_{msicn_tag}_{fie_tag}"
 
 
 def feature_map_to_heatmap(feature: Tensor) -> np.ndarray:
@@ -358,7 +365,11 @@ def run_single_image_pipeline() -> None:
 	else:
 		detections = torch.zeros((0, 6))
 
-	stem = image_path.stem
+	stem = build_output_stem(
+		image_stem=image_path.stem,
+		enable_msicn=ENABLE_MSICN,
+		enable_fie=ENABLE_FIE,
+	)
 	save_pipeline_visualization(
 		original_image=original_image,
 		corrected_tensor=corrected_image,

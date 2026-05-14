@@ -142,6 +142,8 @@ python data-process.py
 **关键配置项（`configs/train.yaml`）：**
 
 ```yaml
+resume_from: null            # 断点续训 checkpoint；为 null 时默认从头训练
+normalize_png_before_train: true  # 训练前按需清洗异常 PNG 元数据
 dataset:
   image_size: 416          # 输入分辨率，论文统一 416×416
 hardware:
@@ -149,7 +151,8 @@ hardware:
   accumulate_steps: 4      # 梯度累积，等效 batch=16
   use_amp: true            # 自动混合精度节省显存
 optimizer:
-	lr: 0.01                 # Adam 初始学习率（阶段 A/B 通用）
+	stage_a_lr: 0.0001      # 阶段 A 学习率；纯 YOLO 基线训练建议保守
+	lr: 0.01                 # 阶段 B 学习率；仅训练 MSICN 时可保持较大
   stage_c_lr: 0.0001       # 阶段 C 学习率（全模型微调用较小值）
   min_lr: 0.00001          # CosineAnnealingLR 最低学习率
 schedule:
@@ -186,6 +189,8 @@ seed: 42
 run_dir: runs/icfie_yolo
 hyp_path: yolov7/data/hyp.scratch.p5.yaml
 project_after_fusion: true
+resume_from: null
+normalize_png_before_train: true
 
 dataset:
 	train_path: data/train.txt
@@ -205,6 +210,7 @@ hardware:
 	accumulate_steps: 4
 
 optimizer:
+	stage_a_lr: 0.0001
 	lr: 0.01
 	min_lr: 0.00001
 
@@ -224,6 +230,37 @@ schedule:
 cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
+
+### 断点续训
+
+当前训练入口已支持从 `stage_a_epoch_N.pt`、`stage_b_epoch_N.pt` 或 `stage_c_epoch_N.pt` 继续训练。
+
+命令行指定 checkpoint：
+
+```bash
+cd /home/pushk3n/github-ai2
+python src/train.py --config configs/train.yaml --resume runs/your_run_dir/stage_c_epoch_2.pt
+```
+
+自动从当前 `run_dir` 选择最新 checkpoint：
+
+```bash
+cd /home/pushk3n/github-ai2
+python src/train.py --config configs/train.yaml --resume
+```
+
+也可以直接在 YAML 顶层指定：
+
+```yaml
+resume_from: runs/your_run_dir/stage_c_epoch_2.pt
+```
+
+说明：
+
+1. `--resume` 会优先覆盖 YAML 里的 `resume_from`。
+2. `--resume` 不带路径时，会自动从 `run_dir` 中选择最新的 `stage_*_epoch_*.pt`。
+3. 续训时会恢复模型、优化器、学习率调度器和 GradScaler 状态，并自动跳过已经完成的前置阶段。
+4. `stage_a_loaded.pt` 只是初始化快照，不建议作为真正的断点续训 checkpoint。
 
 如果要做正式训练，建议先把 [configs/train.yaml](configs/train.yaml) 中的 `schedule.stage_a_epochs`、`schedule.stage_b_epochs` 和 `schedule.stage_c_epochs` 一并调大，再启动训练：
 
@@ -267,10 +304,12 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 4. dataset.class_names: 类别名列表，可留空。
 5. hardware.use_amp: 是否启用混合精度。
 6. hardware.ddp: 是否启用 DDP。
-7. optimizer.lr / optimizer.min_lr: 优化器学习率配置。
+7. optimizer.stage_a_lr / optimizer.lr / optimizer.stage_c_lr / optimizer.min_lr: 分阶段学习率配置。
 8. schedule.stage_a_epochs / schedule.stage_b_epochs / schedule.stage_c_epochs: 三个训练阶段的轮数。
-9. use_ota_loss: 是否启用 YOLOv7 的 OTA loss。
-10. project_after_fusion: 是否对 FIE 输出做 1x1 投影回原始检测头通道。
+9. resume_from: 默认续训 checkpoint 路径，可被 `--resume` 覆盖。
+10. normalize_png_before_train: 训练前是否按需清洗带异常元数据的 PNG。
+11. use_ota_loss: 是否启用 YOLOv7 的 OTA loss。
+12. project_after_fusion: 是否对 FIE 输出做 1x1 投影回原始检测头通道。
 
 说明：
 
@@ -278,6 +317,7 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 2. yolo.num_classes 如果显式写出，必须与 dataset.num_classes 一致。
 3. project_after_fusion 关闭时，前提是你已经同步修改检测头输入通道。
 4. dataset.val_path 字段已预留，后续 eval.py 会复用，但当前 train.py 还没有在训练后自动执行验证。
+5. `normalize_png_before_train=true` 时，训练启动前会扫描训练/验证集中的 PNG，只对包含 `icc_profile/chromaticity/srgb/gamma` 等可疑元数据的文件做重编码，并打印进度，避免 DataLoader 中的 libpng 崩溃。
 
 纯 YOLO / FIE 关闭模式注意事项：
 
@@ -293,6 +333,13 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 2. stage_a_epoch_N.pt
 3. stage_b_epoch_N.pt
 4. stage_c_epoch_N.pt
+
+其中 `stage_a/stage_b/stage_c` 的 epoch checkpoint 额外包含优化器、学习率调度器和 GradScaler 状态，可直接用于断点续训。
+
+额外提醒：
+
+1. 阶段 A 如果直接沿用 `lr=0.01` 去微调整个 YOLO backbone，极易在首个 epoch 就把预训练特征训塌。
+2. 当前代码已把阶段 A 学习率拆成独立的 `optimizer.stage_a_lr`，默认 `1e-4`。
 
 默认输出目录：
 

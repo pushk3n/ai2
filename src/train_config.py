@@ -48,6 +48,7 @@ class DatasetConfig:
 class OptimizerConfig:
     # 优化器配置
 
+    stage_a_lr: float = 1e-4
     lr: float = 1e-2
     stage_c_lr: float = 1e-4
     min_lr: float = 1e-5
@@ -56,18 +57,24 @@ class OptimizerConfig:
     beta2: float = 0.999
 
     def __post_init__(self) -> None:
+        if self.stage_a_lr <= 0:
+            raise ValueError("阶段 A 学习率必须大于 0")
         if self.lr <= 0:
             raise ValueError("学习率必须大于 0")
         if self.stage_c_lr <= 0:
             raise ValueError("阶段 C 学习率必须大于 0")
         if self.min_lr <= 0:
             raise ValueError("最小学习率必须大于 0")
+        if self.min_lr > self.stage_a_lr:
+            raise ValueError("最小学习率不能大于阶段 A 学习率")
         if self.min_lr > self.lr:
-            raise ValueError("最小学习率不能大于初始学习率")
+            raise ValueError("最小学习率不能大于阶段 B 学习率")
         if self.min_lr > self.stage_c_lr:
             raise ValueError("最小学习率不能大于阶段 C 学习率")
 
     def lr_for_stage(self, stage: TrainingStage) -> float:
+        if stage == TrainingStage.STAGE_A:
+            return self.stage_a_lr
         if stage == TrainingStage.STAGE_C:
             return self.stage_c_lr
         return self.lr
@@ -125,6 +132,8 @@ class TrainConfig:
     schedule: StageScheduleConfig
     visualization: VisualizationConfig
     project_after_fusion: bool = True
+    resume_from: Path | None = None
+    normalize_png_before_train: bool = True
     save_every: int = 1
     use_ota_loss: bool = False
     cache_images: bool = False
@@ -197,6 +206,7 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
 
     optimizer_section = _require_mapping("optimizer", root.get("optimizer"))
     optimizer = OptimizerConfig(
+        stage_a_lr=float(optimizer_section.get("stage_a_lr", 1e-4)),
         lr=float(optimizer_section.get("lr", 1e-2)),
         stage_c_lr=float(optimizer_section.get("stage_c_lr", 1e-4)),
         min_lr=float(optimizer_section.get("min_lr", 1e-5)),
@@ -238,6 +248,8 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
         schedule=schedule,
         visualization=visualization,
         project_after_fusion=bool(root.get("project_after_fusion", True)),
+        resume_from=_resolve_path(root.get("resume_from"), project_root=project_root, config_dir=config_dir),
+        normalize_png_before_train=bool(root.get("normalize_png_before_train", True)),
         save_every=int(root.get("save_every", 1)),
         use_ota_loss=bool(root.get("use_ota_loss", False)),
         cache_images=bool(root.get("cache_images", False)),

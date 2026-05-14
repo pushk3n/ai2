@@ -1,5 +1,5 @@
 seed: 42
-run_dir: runs/icfie_yolo
+run_dir: runs/icfie_yolo-5-13-a5-b5-c5
 hyp_path: yolov7/data/hyp.scratch.p5.yaml
 project_after_fusion: true
 save_every: 1
@@ -25,9 +25,24 @@ dataset:
   - Table
   image_size: 416
   single_cls: false
+nc: 12
+names:
+- Bicycle
+- Boat
+- Bottle
+- Bus
+- Car
+- Cat
+- Chair
+- Cup
+- Dog
+- Motorbike
+- People
+- Table
 yolo:
   cfg_path: yolov7/cfg/training/yolov7.yaml
   weights_path: yolov7/yolov7.pt
+  num_classes: 12
 hardware:
   device: cuda:0
   use_amp: true
@@ -39,10 +54,14 @@ hardware:
   use_grad_checkpoint: true
 optimizer:
   lr: 0.01
+  stage_c_lr: 0.0001
   min_lr: 1.0e-05
   weight_decay: 0.0005
   beta1: 0.937
   beta2: 0.999
 schedule:
-  stage_b_epochs: 1
-  stage_c_epochs: 1
+  stage_a_epochs: 5
+  stage_b_epochs: 5
+  stage_c_epochs: 5
+visualization:
+  batch_log_interval: 25

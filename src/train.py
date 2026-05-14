@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from contextlib import contextmanager
 import os
 import random
 import sys
-from dataclasses import asdict
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
 from torch import Tensor, nn
-from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -32,6 +37,308 @@ from utils.datasets import create_dataloader
 from utils.general import check_img_size
 from utils.loss import ComputeLoss, ComputeLossOTA
 from yolo_wrapper import YOLOv7WrapperConfig, build_yolov7_components
+
+
+def configure_matplotlib_cjk_font() -> None:
+    preferred_fonts = (
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Serif CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Droid Sans Fallback",
+    )
+    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+
+    selected_font = None
+    for preferred_font in preferred_fonts:
+        selected_font = next((name for name in available_fonts if preferred_font in name), None)
+        if selected_font is not None:
+            break
+
+    if selected_font is None:
+        print("[警告 Warning] 未找到可用中文字体 / no CJK font found for Matplotlib")
+        return
+
+    matplotlib.rcParams["font.family"] = "sans-serif"
+    matplotlib.rcParams["font.sans-serif"] = [selected_font, "DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+configure_matplotlib_cjk_font()
+
+
+@dataclass(frozen=True)
+class EpochMetric:
+    stage: str
+    stage_index: int
+    epoch: int
+    epochs: int
+    box_loss: float
+    obj_loss: float
+    cls_loss: float
+    total_loss: float
+    learning_rate: float
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class BatchMetric:
+    stage: str
+    stage_index: int
+    epoch: int
+    batch: int
+    total_batches: int
+    box_loss: float
+    obj_loss: float
+    cls_loss: float
+    total_loss: float
+    learning_rate: float
+    elapsed_seconds: float
+
+
+def stage_display_name(stage: TrainingStage) -> str:
+    if stage == TrainingStage.STAGE_A:
+        return "阶段A / Stage A"
+    if stage == TrainingStage.STAGE_B:
+        return "阶段B / Stage B"
+    if stage == TrainingStage.STAGE_C:
+        return "阶段C / Stage C"
+    return f"{stage.value} / {stage.value.upper()}"
+
+
+def metrics_csv_path(run_dir: Path) -> Path:
+    return run_dir / "training_metrics.csv"
+
+
+def metrics_plot_path(run_dir: Path) -> Path:
+    return run_dir / "training_metrics.png"
+
+
+def batch_metrics_csv_path(run_dir: Path) -> Path:
+    return run_dir / "training_batch_metrics.csv"
+
+
+def reset_visualization_artifacts(run_dir: Path) -> None:
+    for artifact_path in (metrics_csv_path(run_dir), batch_metrics_csv_path(run_dir), metrics_plot_path(run_dir)):
+        if artifact_path.exists():
+            artifact_path.unlink()
+
+
+def append_epoch_metrics(run_dir: Path, metric: EpochMetric) -> None:
+    output_path = metrics_csv_path(run_dir)
+    should_write_header = not output_path.exists()
+    with output_path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=(
+                "stage",
+                "stage_index",
+                "epoch",
+                "epochs",
+                "box_loss",
+                "obj_loss",
+                "cls_loss",
+                "total_loss",
+                "learning_rate",
+                "elapsed_seconds",
+            ),
+        )
+        if should_write_header:
+            writer.writeheader()
+        writer.writerow(asdict(metric))
+
+
+def append_batch_metrics(run_dir: Path, metric: BatchMetric) -> None:
+    output_path = batch_metrics_csv_path(run_dir)
+    should_write_header = not output_path.exists()
+    with output_path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=(
+                "stage",
+                "stage_index",
+                "epoch",
+                "batch",
+                "total_batches",
+                "box_loss",
+                "obj_loss",
+                "cls_loss",
+                "total_loss",
+                "learning_rate",
+                "elapsed_seconds",
+            ),
+        )
+        if should_write_header:
+            writer.writeheader()
+        writer.writerow(asdict(metric))
+
+
+def load_epoch_metrics(run_dir: Path) -> list[EpochMetric]:
+    input_path = metrics_csv_path(run_dir)
+    if not input_path.exists():
+        return []
+
+    metrics: list[EpochMetric] = []
+    with input_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            metrics.append(
+                EpochMetric(
+                    stage=str(row["stage"]),
+                    stage_index=int(row["stage_index"]),
+                    epoch=int(row["epoch"]),
+                    epochs=int(row["epochs"]),
+                    box_loss=float(row["box_loss"]),
+                    obj_loss=float(row["obj_loss"]),
+                    cls_loss=float(row["cls_loss"]),
+                    total_loss=float(row["total_loss"]),
+                    learning_rate=float(row["learning_rate"]),
+                    elapsed_seconds=float(row["elapsed_seconds"]),
+                )
+            )
+    return metrics
+
+
+def load_batch_metrics(run_dir: Path) -> list[BatchMetric]:
+    input_path = batch_metrics_csv_path(run_dir)
+    if not input_path.exists():
+        return []
+
+    metrics: list[BatchMetric] = []
+    with input_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            metrics.append(
+                BatchMetric(
+                    stage=str(row["stage"]),
+                    stage_index=int(row["stage_index"]),
+                    epoch=int(row["epoch"]),
+                    batch=int(row["batch"]),
+                    total_batches=int(row["total_batches"]),
+                    box_loss=float(row["box_loss"]),
+                    obj_loss=float(row["obj_loss"]),
+                    cls_loss=float(row["cls_loss"]),
+                    total_loss=float(row["total_loss"]),
+                    learning_rate=float(row["learning_rate"]),
+                    elapsed_seconds=float(row["elapsed_seconds"]),
+                )
+            )
+    return metrics
+
+
+def should_log_batch_metric(batch_index: int, total_batches: int, interval: int) -> bool:
+    current_batch = batch_index + 1
+    if current_batch == 1 or current_batch == total_batches:
+        return True
+    return current_batch % max(interval, 1) == 0
+
+
+def render_training_metrics(run_dir: Path) -> None:
+    metrics = load_epoch_metrics(run_dir)
+    batch_metrics = load_batch_metrics(run_dir)
+    if not metrics and not batch_metrics:
+        return
+
+    stage_colors = {
+        TrainingStage.STAGE_A.value: "#2ca02c",
+        TrainingStage.STAGE_B.value: "#2f6fed",
+        TrainingStage.STAGE_C.value: "#dd8452",
+    }
+    stage_labels = {
+        TrainingStage.STAGE_A.value: "阶段A / Stage A",
+        TrainingStage.STAGE_B.value: "阶段B / Stage B",
+        TrainingStage.STAGE_C.value: "阶段C / Stage C",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9), dpi=140)
+    fig.patch.set_facecolor("#f7f5ef")
+    line_specs = (
+        ("box_loss", "框损失 / Box Loss", axes[0, 0]),
+        ("obj_loss", "目标损失 / Objectness Loss", axes[0, 1]),
+        ("cls_loss", "分类损失 / Classification Loss", axes[1, 0]),
+        ("total_loss", "总损失 / Total Loss", axes[1, 1]),
+    )
+
+    last_batch_position_by_epoch: dict[tuple[str, int], int] = {}
+    for position, metric in enumerate(batch_metrics, start=1):
+        last_batch_position_by_epoch[(metric.stage, metric.epoch)] = position
+
+    epoch_positions = []
+    for index, metric in enumerate(metrics, start=1):
+        epoch_positions.append(last_batch_position_by_epoch.get((metric.stage, metric.epoch), index))
+
+    for field_name, title, axis in line_specs:
+        axis.set_facecolor("#fffdf8")
+        for stage_value in (TrainingStage.STAGE_A.value, TrainingStage.STAGE_B.value, TrainingStage.STAGE_C.value):
+            stage_batch_points = [
+                (position, metric)
+                for position, metric in enumerate(batch_metrics, start=1)
+                if metric.stage == stage_value
+            ]
+            if stage_batch_points:
+                axis.plot(
+                    [position for position, _ in stage_batch_points],
+                    [getattr(metric, field_name) for _, metric in stage_batch_points],
+                    linewidth=1.3,
+                    alpha=0.35,
+                    color=stage_colors.get(stage_value, "#333333"),
+                )
+
+            stage_epoch_points = [
+                (position, metric)
+                for position, metric in zip(epoch_positions, metrics)
+                if metric.stage == stage_value
+            ]
+            if stage_epoch_points:
+                axis.plot(
+                    [position for position, _ in stage_epoch_points],
+                    [getattr(metric, field_name) for _, metric in stage_epoch_points],
+                    marker="o",
+                    linewidth=2.2,
+                    markersize=6.0,
+                    color=stage_colors.get(stage_value, "#333333"),
+                    label=stage_labels.get(stage_value, stage_value),
+                )
+        axis.set_title(title, fontsize=12)
+        axis.set_xlabel("批次记录 / Logged Batch Step")
+        axis.set_ylabel(field_name)
+        axis.grid(True, linestyle="--", linewidth=0.7, alpha=0.35)
+        axis.legend(loc="best")
+
+    fig.suptitle(
+        "ICFIE-YOLO 训练过程可视化 / Training Overview\n浅色曲线=批次趋势 深色圆点=轮次均值 / light line=batch trend, dark marker=epoch mean",
+        fontsize=15,
+        y=0.99,
+    )
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
+    plt.savefig(metrics_plot_path(run_dir), bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def summarize_trainable_modules(model: ICFIEYOLO) -> str:
+    module_pairs = (
+        ("MSICN", model.msicn),
+        ("BackboneNeck", model.backbone_neck),
+        ("FIE", model.fie),
+        ("DetectHead", model.detect_head),
+    )
+    status_parts = []
+    for module_name, module in module_pairs:
+        is_trainable = any(parameter.requires_grad for parameter in module.parameters())
+        status_parts.append(f"{module_name}={'Train' if is_trainable else 'Frozen'}")
+    return " | ".join(status_parts)
+
+
+def stage_order(stage: TrainingStage) -> int:
+    if stage == TrainingStage.STAGE_B:
+        return 2
+    if stage == TrainingStage.STAGE_C:
+        return 3
+    return 1
 
 
 def set_seed(seed: int) -> None:
@@ -229,23 +536,31 @@ def apply_training_stage(model: ICFIEYOLO, stage: TrainingStage) -> None:
     raise ValueError(f"不支持的训练阶段: {stage}")
 
 
-def build_optimizer(model: ICFIEYOLO, config: TrainConfig) -> Adam:
+def build_optimizer(model: ICFIEYOLO, config: TrainConfig, stage: TrainingStage) -> Adam:
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable_parameters:
         raise RuntimeError("当前阶段没有可训练参数")
+    learning_rate = config.optimizer.lr_for_stage(stage)
     return Adam(
         trainable_parameters,
-        lr=config.optimizer.lr,
+        lr=learning_rate,
         betas=(config.optimizer.beta1, config.optimizer.beta2),
         weight_decay=config.optimizer.weight_decay,
     )
 
 
 def forward_for_stage(model: ICFIEYOLO, images: Tensor, stage: TrainingStage) -> list[Tensor]:
+    # 阶段 A: 通过 ICFIEYOLO.forward_stage_a 保持四层边界
+    #         backbone_neck 和 detect_head 在 train 模式  msicn / fie 在 eval 模式
+    #         不经过 MSICN 和 FIE，建立纯 YOLO 基线
     # 阶段 B: 通过 ICFIEYOLO.forward_stage_b 保持四层边界
     #         backbone_neck 和 detect_head 已在 apply_training_stage 中切换到 eval
     #         no_grad 包裹在 forward_stage_b 内部处理
     # 阶段 C: 正常全模型前向  四层均在 train 模式且梯度开放
+    if stage == TrainingStage.STAGE_A:
+        predictions = model.forward_stage_a(images)
+        return extract_prediction_maps(predictions)
+
     if stage == TrainingStage.STAGE_B:
         predictions = model.forward_stage_b(images)
         return extract_prediction_maps(predictions)
@@ -300,12 +615,12 @@ def train_stage(
 ) -> None:
     if epochs == 0:
         if is_main_process(rank):
-            print(f"[跳过] {stage.value} epochs=0")
+            print(f"[跳过 Skip] {stage_display_name(stage)} | epochs=0")
         return
 
     base_model = unwrap_model(model)
     apply_training_stage(base_model, stage)
-    optimizer = build_optimizer(base_model, config)
+    optimizer = build_optimizer(base_model, config, stage)
     scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1), eta_min=config.optimizer.min_lr)
     # torch.cuda.amp.GradScaler 已废弃，改用 torch.amp.GradScaler
     scaler = torch.amp.GradScaler(device.type, enabled=config.hardware.use_amp and device.type == "cuda")
@@ -313,16 +628,30 @@ def train_stage(
     accumulate_steps = max(config.hardware.accumulate_steps, 1)
 
     if is_main_process(rank):
-        print(f"[开始] {stage.value} epochs={epochs} batch_size={config.hardware.batch_size} accumulate={accumulate_steps}")
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(
+            f"[开始 Start] {stage_display_name(stage)} | epochs={epochs} | batch_size={config.hardware.batch_size} "
+            f"| accumulate={accumulate_steps} | lr={current_lr:.6g}"
+        )
+        print(f"[阶段配置 Stage Setup] {summarize_trainable_modules(base_model)}")
+        print(
+            f"[可视化 Visualization] epoch_csv={metrics_csv_path(config.run_dir)} | batch_csv={batch_metrics_csv_path(config.run_dir)} "
+            f"| png={metrics_plot_path(config.run_dir)} | interval={config.visualization.batch_log_interval}"
+        )
 
     for epoch in range(epochs):
+        epoch_start_time = time.perf_counter()
         if config.hardware.ddp and hasattr(dataloader, "sampler") and dataloader.sampler is not None:
             dataloader.sampler.set_epoch(epoch)
 
         optimizer.zero_grad(set_to_none=True)
         progress = enumerate(dataloader)
         if is_main_process(rank):
-            progress = tqdm(progress, total=len(dataloader), desc=f"{stage.value} {epoch + 1}/{epochs}")
+            progress = tqdm(
+                progress,
+                total=len(dataloader),
+                desc=f"{stage_display_name(stage)} | epoch {epoch + 1}/{epochs}",
+            )
 
         mean_loss = torch.zeros(4, device=device)
         for batch_index, (images, targets, _, _) in progress:
@@ -335,6 +664,15 @@ def train_stage(
                 if world_size > 1:
                     loss = loss * world_size
                 loss = loss / accumulate_steps
+
+            loss_is_finite = torch.isfinite(loss.detach())
+            loss_items_are_finite = torch.isfinite(loss_items.detach()).all()
+            if not bool(loss_is_finite and loss_items_are_finite):
+                current_lr = optimizer.param_groups[0]["lr"]
+                raise RuntimeError(
+                    f"{stage_display_name(stage)} 在 epoch {epoch + 1} batch {batch_index + 1} 出现非有限损失 / non-finite loss: "
+                    f"loss={loss.detach().item()} loss_items={loss_items.detach().tolist()} lr={current_lr:.6g}"
+                )
 
             scaler.scale(loss).backward()
 
@@ -351,11 +689,55 @@ def train_stage(
                     obj=f"{mean_loss[1].item():.4f}",
                     cls=f"{mean_loss[2].item():.4f}",
                     total=f"{mean_loss[3].item():.4f}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.3e}",
                 )
+                if should_log_batch_metric(batch_index, len(dataloader), config.visualization.batch_log_interval):
+                    append_batch_metrics(
+                        config.run_dir,
+                        BatchMetric(
+                            stage=stage.value,
+                            stage_index=stage_order(stage),
+                            epoch=epoch + 1,
+                            batch=batch_index + 1,
+                            total_batches=len(dataloader),
+                            box_loss=float(mean_loss[0].item()),
+                            obj_loss=float(mean_loss[1].item()),
+                            cls_loss=float(mean_loss[2].item()),
+                            total_loss=float(mean_loss[3].item()),
+                            learning_rate=float(optimizer.param_groups[0]["lr"]),
+                            elapsed_seconds=float(time.perf_counter() - epoch_start_time),
+                        ),
+                    )
+
+        epoch_elapsed = time.perf_counter() - epoch_start_time
+        metric = EpochMetric(
+            stage=stage.value,
+            stage_index=stage_order(stage),
+            epoch=epoch + 1,
+            epochs=epochs,
+            box_loss=float(mean_loss[0].item()),
+            obj_loss=float(mean_loss[1].item()),
+            cls_loss=float(mean_loss[2].item()),
+            total_loss=float(mean_loss[3].item()),
+            learning_rate=float(optimizer.param_groups[0]["lr"]),
+            elapsed_seconds=epoch_elapsed,
+        )
+        if is_main_process(rank):
+            append_epoch_metrics(config.run_dir, metric)
+            render_training_metrics(config.run_dir)
+            print(
+                f"[轮次完成 Epoch End] {stage_display_name(stage)} | epoch={epoch + 1}/{epochs} "
+                f"| box损失 box={metric.box_loss:.4f} | 目标损失 obj={metric.obj_loss:.4f} "
+                f"| 分类损失 cls={metric.cls_loss:.4f} | 总损失 total={metric.total_loss:.4f} "
+                f"| 学习率 lr={metric.learning_rate:.6g} | 用时 elapsed={metric.elapsed_seconds:.1f}s"
+            )
 
         scheduler.step()
         if is_main_process(rank) and (epoch + 1) % max(config.save_every, 1) == 0:
             save_checkpoint(model, optimizer, config, stage, epoch)
+            print(
+                f"[检查点 Checkpoint] {stage_display_name(stage)} | saved={config.run_dir / f'{stage.value}_epoch_{epoch + 1}.pt'}"
+            )
 
 
 def save_stage_a_checkpoint(model: nn.Module, config: TrainConfig, rank: int) -> None:
@@ -403,20 +785,36 @@ def main() -> None:
 
     device, rank, _, world_size = init_distributed_mode(config.hardware)
     try:
+        if is_main_process(rank):
+            reset_visualization_artifacts(config.run_dir)
         set_seed(config.seed)
         hyp = load_hyperparameters(config)
         base_model, loss_owner, stride, class_names = build_model(config, device, hyp)
         model = maybe_wrap_model(base_model, device, config.hardware)
         dataloader, _, image_size = build_train_dataloader(config, hyp, stride, rank, world_size)
 
-        save_stage_a_checkpoint(model, config, rank)
         if is_main_process(rank):
-            print(f"[配置文件] {resolved_config_path}")
-            print(f"[阶段A] 已加载 YOLOv7 预训练权重  视为完成")
-            print(f"[配置] img_size={image_size} classes={len(class_names)} stride={stride}")
+            print(f"[配置文件 Config] {resolved_config_path}")
+            print(f"[训练配置 Train Setup] img_size={image_size} | classes={len(class_names)} | stride={stride}")
             # 将 YAML 配置快照写入 run_dir  便于后续复现实验
             import shutil
             shutil.copy2(resolved_config_path, config.run_dir / "train_config_snapshot.yaml")
+            print(f"[运行目录 Run Dir] {config.run_dir}")
+
+        # 阶段 A: 预训练 backbone + detect head（纯 YOLO，不经过 MSICN/FIE）
+        # 保存初始权重快照（yolov7.pt 迁移状态，阶段 A 训练前）
+        save_stage_a_checkpoint(model, config, rank)
+        train_stage(
+            model=model,
+            loss_owner=loss_owner,
+            dataloader=dataloader,
+            config=config,
+            stage=TrainingStage.STAGE_A,
+            epochs=config.schedule.stage_a_epochs,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+        )
 
         train_stage(
             model=model,

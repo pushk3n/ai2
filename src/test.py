@@ -53,17 +53,42 @@ from utils.general import non_max_suppression, scale_coords
 # 宏定义区: 需要测试哪张图  直接改这里
 # ================================================================
 
-TARGET_IMAGE_NAME = "1.png"
+TARGET_IMAGE_NAME = "light.png"
 IMG_SIZE = 416
 DEVICE = "cpu"
-ENABLE_MSICN = True   # False: 跳过光照矫正  纯 YOLO baseline
+ENABLE_MSICN = False   # False: 跳过光照矫正  纯 YOLO baseline
 ENABLE_FIE = True     # False: 跳过特征增强  纯 YOLO baseline
 ENABLE_NMS: bool = True   # False: 跳过 NMS  不显示检测框
 CONF_THRES: float = 0.25
 IOU_THRES: float = 0.45
 YOLO_CFG_PATH = YOLOV7_ROOT / "cfg" / "training" / "yolov7.yaml"
-YOLO_WEIGHTS_PATH: Path | None = YOLOV7_ROOT / "yolov7.pt"
-YOLO_NUM_CLASSES: int | None = 80
+
+YOLO_WEIGHTS_PATH: Path | None = YOLOV7_ROOT / "yolov7.pt"  	# yolov7 官方预训练权重  需要先下载放到 yolov7/ 目录下
+
+# 训练出来的权重路径  需要先训练好模型并修改这里的路径
+# 注意: 不同 FIE 开关状态需要使用不同 checkpoint:
+#   ENABLE_FIE=True  → 使用 Stage C checkpoint (backbone+FIE+detect 联合微调)
+#   ENABLE_FIE=False → 使用 Stage A checkpoint (纯 YOLO baseline，backbone+detect 无 FIE 预训练)
+# 若 FIE 禁用时仍加载 Stage C checkpoint，detect head 期望的是 FIE 输出特征分布，
+# 收到原始 backbone 特征后置信度全部偏低，NMS 将滤除所有框。
+ICFIE_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13" / "stage_c_epoch_3.pt"
+
+# 纯 YOLO 模式（ENABLE_FIE=False）专用 checkpoint
+# 重新训练后指向 stage_a_epoch_<N>.pt（Stage A 训练完成后生成）
+# 若设为 None 且 ENABLE_FIE=False，只保留 yolov7.pt 主干权重（检测头为随机初始化，12 类可能无法检出）
+YOLO_ONLY_CHECKPOINT_PATH: Path | None = None  # e.g. PROJECT_ROOT / "runs" / "icfie_yolo-5-13" / "stage_a_epoch_3.pt"
+
+YOLO_NUM_CLASSES: int | None = 12	# 这里需要与训练配置中的 dataset.num_classes 保持一致  否则会导致模型加载失败或推理错误
+
+# ExDark 12 类别名  与 data-process.py/train.yaml 保持一致
+# 注意: build_yolov7_components 加载 yolov7.pt 时会把 class_names 覆盖为 COCO 80 类名
+# 必须在 build_model 里用下面的列表替换  否则 class_id=10 会被映射成 COCO 的 "fire hydrant"
+EXDARK_CLASS_NAMES: list[str] = [
+	"Bicycle", "Boat", "Bottle", "Bus", "Car",
+	"Cat", "Chair", "Cup", "Dog", "Motorbike",
+	"People", "Table",
+]
+
 INPUT_DIR = PROJECT_ROOT / "test_sample"
 OUTPUT_DIR = PROJECT_ROOT / "results" / "single_image_pipeline"
 
@@ -258,7 +283,29 @@ def build_model(device: torch.device) -> tuple[ICFIEYOLO, int, list[str]]:
 		fie=fie_config,
 	)
 	model = ICFIEYOLO(backbone_neck=backbone, detect_head=detect_head, config=model_config)
-	return model.to(device).eval(), stride, [str(name) for name in class_names]
+
+	# 根据 FIE 状态选择对应 checkpoint:
+	#   FIE 开启 → Stage C checkpoint（全模型含 FIE 联合微调）
+	#   FIE 关闭 → Stage A checkpoint（纯 YOLO 预训练，detect head 针对原始 backbone 特征）
+	# 两者不可混用：Stage C 的 detect head 仅对 FIE 输出有效，关闭 FIE 后置信度会全部偏低。
+	if ENABLE_FIE:
+		checkpoint_path = ICFIE_CHECKPOINT_PATH
+	else:
+		checkpoint_path = YOLO_ONLY_CHECKPOINT_PATH
+		if checkpoint_path is None and ICFIE_CHECKPOINT_PATH is not None:
+			print(
+				"[警告] ENABLE_FIE=False 但未设置 YOLO_ONLY_CHECKPOINT_PATH。\n"
+				"  Stage C checkpoint 的 detect head 是针对 FIE 特征训练的，关闭 FIE 后无法正常检测。\n"
+				"  请重新训练并将 YOLO_ONLY_CHECKPOINT_PATH 指向 stage_a_epoch_<N>.pt。"
+			)
+
+	if checkpoint_path is not None:
+		checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+		model.load_state_dict(checkpoint["model"], strict=True)
+
+	# build_yolov7_components 从 yolov7.pt 拿到的 class_names 是 COCO 80 类名
+	# 必须替换为 ExDark 12 类名  否则 class_id=10 → "fire hydrant" 而非 "People"
+	return model.to(device).eval(), stride, EXDARK_CLASS_NAMES
 
 
 def run_single_image_pipeline() -> None:

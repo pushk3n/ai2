@@ -49,6 +49,7 @@ class OptimizerConfig:
     # 优化器配置
 
     lr: float = 1e-2
+    stage_c_lr: float = 1e-4
     min_lr: float = 1e-5
     weight_decay: float = 5e-4
     beta1: float = 0.937
@@ -57,22 +58,43 @@ class OptimizerConfig:
     def __post_init__(self) -> None:
         if self.lr <= 0:
             raise ValueError("学习率必须大于 0")
+        if self.stage_c_lr <= 0:
+            raise ValueError("阶段 C 学习率必须大于 0")
         if self.min_lr <= 0:
             raise ValueError("最小学习率必须大于 0")
         if self.min_lr > self.lr:
             raise ValueError("最小学习率不能大于初始学习率")
+        if self.min_lr > self.stage_c_lr:
+            raise ValueError("最小学习率不能大于阶段 C 学习率")
+
+    def lr_for_stage(self, stage: TrainingStage) -> float:
+        if stage == TrainingStage.STAGE_C:
+            return self.stage_c_lr
+        return self.lr
 
 
 @dataclass(frozen=True)
 class StageScheduleConfig:
     # 分阶段训练轮数配置
 
+    stage_a_epochs: int = 3
     stage_b_epochs: int = 1
     stage_c_epochs: int = 1
 
     def __post_init__(self) -> None:
-        if self.stage_b_epochs < 0 or self.stage_c_epochs < 0:
+        if self.stage_a_epochs < 0 or self.stage_b_epochs < 0 or self.stage_c_epochs < 0:
             raise ValueError("阶段训练轮数不能为负数")
+
+
+@dataclass(frozen=True)
+class VisualizationConfig:
+    # 训练可视化配置
+
+    batch_log_interval: int = 25
+
+    def __post_init__(self) -> None:
+        if self.batch_log_interval <= 0:
+            raise ValueError("batch_log_interval 必须大于 0")
 
 
 @dataclass
@@ -101,6 +123,7 @@ class TrainConfig:
     hardware: HardwareConfig
     optimizer: OptimizerConfig
     schedule: StageScheduleConfig
+    visualization: VisualizationConfig
     project_after_fusion: bool = True
     save_every: int = 1
     use_ota_loss: bool = False
@@ -175,6 +198,7 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
     optimizer_section = _require_mapping("optimizer", root.get("optimizer"))
     optimizer = OptimizerConfig(
         lr=float(optimizer_section.get("lr", 1e-2)),
+        stage_c_lr=float(optimizer_section.get("stage_c_lr", 1e-4)),
         min_lr=float(optimizer_section.get("min_lr", 1e-5)),
         weight_decay=float(optimizer_section.get("weight_decay", 5e-4)),
         beta1=float(optimizer_section.get("beta1", 0.937)),
@@ -183,8 +207,14 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
 
     schedule_section = _require_mapping("schedule", root.get("schedule"))
     schedule = StageScheduleConfig(
+        stage_a_epochs=int(schedule_section.get("stage_a_epochs", 3)),
         stage_b_epochs=int(schedule_section.get("stage_b_epochs", 1)),
         stage_c_epochs=int(schedule_section.get("stage_c_epochs", 1)),
+    )
+
+    visualization_section = _require_mapping("visualization", root.get("visualization"))
+    visualization = VisualizationConfig(
+        batch_log_interval=int(visualization_section.get("batch_log_interval", 25)),
     )
 
     yolo_section = _require_mapping("yolo", root.get("yolo"))
@@ -206,6 +236,7 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
         hardware=hardware,
         optimizer=optimizer,
         schedule=schedule,
+        visualization=visualization,
         project_after_fusion=bool(root.get("project_after_fusion", True)),
         save_every=int(root.get("save_every", 1)),
         use_ota_loss=bool(root.get("use_ota_loss", False)),

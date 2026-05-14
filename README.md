@@ -1,3 +1,20 @@
+# ICFIE-YOLO 低照度图像目标检测
+
+本项目复现论文《基于ICFIE-YOLO的低照度图像目标检测方法》（秦嘉奇、江泽涛、雷晓春，电子学报 2025）。  
+论文提出将多尺度光照矫正网络（MSICN）与特征交互增强检测头（FIE）集成到 YOLOv7 框架，在低照度数据集 ExDark 上实现端到端训练，mAP 较现有方法提升 2.1 个百分点以上。
+
+**核心模块：**
+- **MSICN**（`src/msicn.py`）：IFE → GIC/LIC → NLIS，无参考图的多尺度光照矫正
+- **YOLOv7 BackboneNeck**（`src/yolo_wrapper.py`）：加载官方预训练权重，提取 P3/P4/P5 多尺度特征
+- **FIE**（`src/fie.py`）：空间交互增强 + 通道交互增强，抑制低照度特征噪声
+- **Detect Head**（`src/detect.py`）：适配 FIE 输出通道的检测头
+
+**训练策略：**　三阶段对齐训练 — 保存预训练初始化快照 → 纯 YOLO 基线训练（阶段 A）→ 仅优化 MSICN（阶段 B）→ 全模型微调（阶段 C），详细说明见 [docs/train.md](docs/train.md)。
+
+---
+
+## 环境配置
+
 ### 配置虚拟环境
 #### 这里以conda为例
 
@@ -96,24 +113,52 @@ python data-process.py
 
 ### 训练介绍
 
-当前仓库已经提供 ICFIE-YOLO 三阶段训练入口: src/train.py。
+完整的训练原理、参数说明与结果评判方法见 **[docs/train.md](docs/train.md)**，这里仅列出快速参考。
 
-训练参数现在统一通过 YAML 文件管理，默认配置文件为 configs/train.yaml。
+`src/train.py` 是 ICFIE-YOLO 三阶段训练的唯一入口，训练参数统一通过 `configs/train.yaml` 管理。
 
-三阶段与 PRD 的对应关系如下：
+**三阶段概述：**
 
-1. 阶段 A：直接加载 yolov7.pt，视为正常光照预训练已完成，并保存 stage_a_loaded.pt。
-2. 阶段 B：只训练 MSICN，显式冻结 YOLO backbone_neck 和 detect_head；冻结模块参数不更新，但梯度链保留，以便检测损失能够反传回 MSICN。
-3. 阶段 C：解冻 MSICN、YOLO backbone_neck、FIE 和 detect_head，进行端到端联合微调。
+| 阶段 | 可训练模块 | 目标 |
+|------|-----------|------|
+| 初始化快照 | — | 加载 YOLOv7 `yolov7.pt` 预训练权重，保存 `stage_a_loaded.pt` |
+| 阶段 A | YOLO BackboneNeck + Detect Head | 在 ExDark 上训练纯 YOLO 基线，生成 `stage_a_epoch_N.pt`，供 `ENABLE_FIE=False` 使用 |
+| 阶段 B | MSICN | 冻结阶段 A 训练好的纯 YOLO 检测器，仅用检测损失驱动光照矫正网络 |
+| 阶段 C | 全模型 | 解冻所有模块，端到端联合微调 |
 
-训练脚本默认行为：
+**训练过程中监控指标：**
 
-1. 输入尺寸默认 416。
-2. 优化器默认 Adam，lr=1e-2，min_lr=1e-5。
-3. 默认开启 FIE 后投影，对接原始 YOLOv7 检测头输入通道。
-4. 默认输出目录为 runs/icfie_yolo/。
-5. 当前 [configs/train.yaml](configs/train.yaml) 已按单卡 4060 调整为 `cuda:0 + AMP + grad checkpoint`。
-6. 当前 [configs/train.yaml](configs/train.yaml) 中 `stage_b_epochs` 和 `stage_c_epochs` 默认均为 `1`，用于快速冒烟验证训练链路。
+每个 epoch 在终端和 `runs/<run_dir>/training_metrics.csv` 中记录四个损失项：
+
+| 字段 | 含义 |
+|------|------|
+| `box_loss` | 边界框定位损失（IoU-based） |
+| `obj_loss` | 目标置信度损失（objectness） |
+| `cls_loss` | 分类损失（cross entropy） |
+| `total_loss` | 三项之和，是优化目标 |
+
+训练结束后用 `src/yolo_test.py` 或 YOLOv7 官方 `test.py` 评估 **mAP@0.5**、**mAP@0.5:0.95** 和 **Recall**。
+
+**关键配置项（`configs/train.yaml`）：**
+
+```yaml
+dataset:
+  image_size: 416          # 输入分辨率，论文统一 416×416
+hardware:
+  batch_size: 4            # 单卡 4060 推荐值
+  accumulate_steps: 4      # 梯度累积，等效 batch=16
+  use_amp: true            # 自动混合精度节省显存
+optimizer:
+	lr: 0.01                 # Adam 初始学习率（阶段 A/B 通用）
+  stage_c_lr: 0.0001       # 阶段 C 学习率（全模型微调用较小值）
+  min_lr: 0.00001          # CosineAnnealingLR 最低学习率
+schedule:
+	stage_a_epochs: 5        # 阶段 A 轮数；用于建立纯 YOLO baseline
+	stage_b_epochs: 5        # 阶段 B 轮数；当前配置值
+	stage_c_epochs: 5        # 阶段 C 轮数；当前配置值
+```
+
+当前 `configs/train.yaml` 已按单卡 4060 调整为 `cuda:0 + AMP + grad checkpoint`。
 
 ### 训练数据准备
 
@@ -164,6 +209,7 @@ optimizer:
 	min_lr: 0.00001
 
 schedule:
+	stage_a_epochs: 1
 	stage_b_epochs: 1
 	stage_c_epochs: 1
 ```
@@ -179,7 +225,7 @@ cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
 
-如果要做正式训练，建议先把 [configs/train.yaml](configs/train.yaml) 中的 `schedule.stage_b_epochs` 和 `schedule.stage_c_epochs` 从 `1` 调大，例如改成 `30`：
+如果要做正式训练，建议先把 [configs/train.yaml](configs/train.yaml) 中的 `schedule.stage_a_epochs`、`schedule.stage_b_epochs` 和 `schedule.stage_c_epochs` 一并调大，再启动训练：
 
 ```bash
 cd /home/pushk3n/github-ai2
@@ -222,7 +268,7 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 5. hardware.use_amp: 是否启用混合精度。
 6. hardware.ddp: 是否启用 DDP。
 7. optimizer.lr / optimizer.min_lr: 优化器学习率配置。
-8. schedule.stage_b_epochs / schedule.stage_c_epochs: 两个训练阶段的轮数。
+8. schedule.stage_a_epochs / schedule.stage_b_epochs / schedule.stage_c_epochs: 三个训练阶段的轮数。
 9. use_ota_loss: 是否启用 YOLOv7 的 OTA loss。
 10. project_after_fusion: 是否对 FIE 输出做 1x1 投影回原始检测头通道。
 
@@ -233,13 +279,20 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 3. project_after_fusion 关闭时，前提是你已经同步修改检测头输入通道。
 4. dataset.val_path 字段已预留，后续 eval.py 会复用，但当前 train.py 还没有在训练后自动执行验证。
 
+纯 YOLO / FIE 关闭模式注意事项：
+
+1. `stage_a_loaded.pt` 只是加载 `yolov7.pt` 后的初始化快照，不是训练完成的纯 YOLO 权重。
+2. 如果在 [src/test.py](src/test.py) 中设置 `ENABLE_FIE=False`，应把 `YOLO_ONLY_CHECKPOINT_PATH` 指向 `stage_a_epoch_N.pt`。
+3. 不要在 `ENABLE_FIE=False` 时加载 `stage_c_epoch_N.pt`，因为阶段 C 的 detect head 已经适配了 FIE 输出特征分布，关闭 FIE 后通常会导致 NMS 置信度整体过低。
+
 ### 训练输出
 
 训练过程会在 run-dir 下保存以下文件：
 
 1. stage_a_loaded.pt
-2. stage_b_epoch_N.pt
-3. stage_c_epoch_N.pt
+2. stage_a_epoch_N.pt
+3. stage_b_epoch_N.pt
+4. stage_c_epoch_N.pt
 
 默认输出目录：
 

@@ -28,6 +28,12 @@ ExDark 标注文件格式（bbGt version=3，文件名 = 图像文件名 + .txt�
             val/     ← 验证集 YOLO 格式标注 (.txt)
         train.txt    ← 训练集图像路径列表
         val.txt      ← 验证集图像路径列表
+
+脚本会自动同步 configs/train.yaml 中以下字段：
+    1. dataset.train_path / val_path
+    2. dataset.num_classes / class_names
+    3. yolo.num_classes
+    4. nc / names（兼容 YOLOv7 常见数据集配置字段）
 """
 
 from __future__ import annotations
@@ -49,6 +55,18 @@ OUTPUT_DIR = "data/Exdark"
 # 训练配置文件路径（脚本末尾会自动更新 dataset.train_path / val_path）
 TRAIN_CONFIG_PATH = "configs/train.yaml"
 
+# 是否在生成前清空 OUTPUT_DIR 下的 images/train|val 与 labels/train|val
+# 这样可避免重新划分数据集后残留旧文件，保证 images/labels 与 train.txt/val.txt 完全一致。
+CLEAN_OUTPUT_SPLIT_DIRS = True
+
+# 是否在导出阶段重编码 PNG 图像。
+# ExDark 中部分 PNG 自带错误的 ICC / cHRM 元数据，训练读取时会触发 libpng warning。
+# 该操作会增加 CPU / IO 开销，默认关闭；只有在确实需要清理 libpng warning 时再手动打开。
+NORMALIZE_PNG_OUTPUT = True
+
+# 仅当 PNG 包含以下可疑元数据时才执行清洗，避免对所有 PNG 做不必要的重编码。
+PNG_METADATA_KEYS_TO_STRIP = ("icc_profile", "chromaticity", "srgb", "gamma")
+
 # 验证集占比（0.0~1.0）
 VAL_SPLIT_RATIO = 0.2
 
@@ -67,6 +85,7 @@ from pathlib import Path
 
 import yaml
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 # ExDark 12 类别（顺序与 train.yaml 保持一致）
 CLASSES = [
@@ -179,6 +198,93 @@ def collect_images(img_root: Path) -> list[Path]:
     return images
 
 
+def prepare_output_dirs(out_root: Path) -> None:
+    """准备输出目录，必要时先清理旧的 train/val 切分结果。"""
+    split_dirs = [
+        out_root / "images" / "train",
+        out_root / "images" / "val",
+        out_root / "labels" / "train",
+        out_root / "labels" / "val",
+    ]
+
+    if CLEAN_OUTPUT_SPLIT_DIRS:
+        for split_dir in split_dirs:
+            if split_dir.exists():
+                shutil.rmtree(split_dir)
+
+    for split_dir in split_dirs:
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+
+def read_valid_image_size(img_path: Path) -> tuple[int, int] | None:
+    """读取图像尺寸，并尽早识别损坏图像。"""
+    try:
+        # verify() 会检查文件完整性；检查后需重新打开才能继续读取属性。
+        with Image.open(img_path) as image:
+            image.verify()
+
+        with Image.open(img_path) as image:
+            img_w, img_h = image.size
+    except Exception as exc:
+        print(f"  [警告] 图像损坏或无法读取: {img_path} ({exc})，已跳过。")
+        return None
+
+    if img_w <= 0 or img_h <= 0:
+        print(f"  [警告] 图像尺寸非法: {img_path} ({img_w}x{img_h})，已跳过。")
+        return None
+
+    return img_w, img_h
+
+
+def export_image_file(src_img: Path, dst_img: Path) -> bool:
+    """导出图像文件；必要时重编码 PNG 以清理异常元数据。"""
+    if NORMALIZE_PNG_OUTPUT and src_img.suffix.lower() == ".png":
+        try:
+            with Image.open(src_img) as image:
+                image.load()
+                if not any(key in image.info for key in PNG_METADATA_KEYS_TO_STRIP):
+                    shutil.copy2(src_img, dst_img)
+                    return False
+
+                image.save(dst_img, format="PNG", pnginfo=PngInfo())
+            return True
+        except Exception as exc:
+            print(f"  [警告] PNG 重编码失败: {src_img} ({exc})，将退回原样拷贝。")
+
+    shutil.copy2(src_img, dst_img)
+    return False
+
+
+def update_train_config(config_path: Path, train_txt: Path, val_txt: Path) -> None:
+    """同步训练配置，兼容当前工程配置与 YOLOv7 常见字段。"""
+    if not config_path.exists():
+        print(f"  [警告] 配置文件 {config_path} 不存在，跳过更新。")
+        return
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    if not isinstance(cfg, dict):
+        raise ValueError(f"配置文件 {config_path} 顶层必须是 YAML 映射。")
+
+    cfg.setdefault("dataset", {})
+    cfg["dataset"]["train_path"] = str(train_txt.resolve())
+    cfg["dataset"]["val_path"] = str(val_txt.resolve())
+    cfg["dataset"]["num_classes"] = len(CLASSES)
+    cfg["dataset"]["class_names"] = list(CLASSES)
+
+    cfg.setdefault("yolo", {})
+    cfg["yolo"]["num_classes"] = len(CLASSES)
+
+    cfg["nc"] = len(CLASSES)
+    cfg["names"] = list(CLASSES)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+    print(f"      已同步数据集路径、类别数量和类别名称到 {config_path}。")
+
+
 # ──────────────────────────────────────────────
 # 主流程
 # ──────────────────────────────────────────────
@@ -202,9 +308,7 @@ def main() -> None:
         sys.exit(1)
 
     # ── 创建输出目录 ──────────────────────────
-    for split in ("train", "val"):
-        (out_root / "images" / split).mkdir(parents=True, exist_ok=True)
-        (out_root / "labels" / split).mkdir(parents=True, exist_ok=True)
+    prepare_output_dirs(out_root)
 
     # ── 收集图像并划分训练/验证集 ─────────────
     print("[1/4] 扫描图像文件...")
@@ -224,6 +328,8 @@ def main() -> None:
 
     skipped_no_anno = 0
     skipped_no_bbox = 0
+    skipped_bad_image = 0
+    normalized_png = 0
     processed = 0
     train_paths: list[str] = []
     val_paths: list[str] = []
@@ -243,14 +349,12 @@ def main() -> None:
             skipped_no_anno += 1
             continue
 
-        # 读取图像尺寸（仅读元数据，不解码全图，节省内存）
-        try:
-            with Image.open(img_path) as im:
-                img_w, img_h = im.size
-        except Exception as e:
-            print(f"  [警告] 无法读取图像 {img_path}: {e}，跳过。")
-            skipped_no_anno += 1
+        # 读取图像尺寸，并在复制前识别损坏图像
+        image_size = read_valid_image_size(img_path)
+        if image_size is None:
+            skipped_bad_image += 1
             continue
+        img_w, img_h = image_size
 
         # 解析标注
         yolo_lines = parse_exdark_anno(anno_path, img_w, img_h)
@@ -258,8 +362,10 @@ def main() -> None:
             skipped_no_bbox += 1
             continue
 
-        # 拷贝图像
-        shutil.copy2(img_path, dst_img)
+        # 导出图像；PNG 会按需重编码以清理异常元数据
+        png_was_normalized = export_image_file(img_path, dst_img)
+        if png_was_normalized:
+            normalized_png += 1
 
         # 写入 YOLO 标注
         dst_lbl.write_text("\n".join(yolo_lines) + "\n", encoding="utf-8")
@@ -273,7 +379,13 @@ def main() -> None:
 
         processed += 1
 
-    print(f"      处理完成: {processed} 张，跳过（无标注）: {skipped_no_anno}，跳过（空 bbox）: {skipped_no_bbox}。")
+    print(
+        f"      处理完成: {processed} 张，"
+        f"跳过（无标注）: {skipped_no_anno}，"
+        f"跳过（损坏图像）: {skipped_bad_image}，"
+        f"跳过（空 bbox）: {skipped_no_bbox}，"
+        f"PNG 重编码: {normalized_png}。"
+    )
 
     if processed == 0:
         print("[错误] 没有任何图像被成功处理，请检查标注目录和格式。")
@@ -292,21 +404,7 @@ def main() -> None:
 
     # ── 更新 configs/train.yaml ───────────────
     print("[4/4] 更新训练配置文件...")
-
-    if not config_path.exists():
-        print(f"  [警告] 配置文件 {config_path} 不存在，跳过更新。")
-    else:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-
-        cfg.setdefault("dataset", {})
-        cfg["dataset"]["train_path"] = str(train_txt.resolve())
-        cfg["dataset"]["val_path"] = str(val_txt.resolve())
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(cfg, f, allow_unicode=True, sort_keys=False)
-
-        print(f"      已将 train_path / val_path 写入 {config_path}。")
+    update_train_config(config_path, train_txt, val_txt)
 
     print()
     print("=" * 60)

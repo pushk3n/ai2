@@ -120,12 +120,27 @@ class ICFIEYOLO(nn.Module):
             return corrected_image
         return corrected_image.to(dtype=first_parameter.dtype)
 
+    def forward_stage_a(self, image: Tensor) -> object:
+        # PRD 阶段 A 专用前向
+        #
+        # 数据流:
+        #   backbone_neck (梯度流通) -> detect_head (梯度流通)
+        #   MSICN 和 FIE 均不参与前向  目的是预训练纯 YOLO 基线 (ExDark 12 类)
+        #   stage_a 权重可在推理时搭配 ENABLE_FIE=False 使用，实现独立模块验证
+        #
+        # 调用方在切换到阶段 A 之前必须确保:
+        #   1. apply_training_stage(model, STAGE_A) 已调用  确保 requires_grad 设置正确
+        #   2. backbone_neck / detect_head 已切换到 train 模式  msicn / fie 已切换到 eval 模式
+        raw_features = self._normalize_features(self.backbone_neck(image))
+        predictions = self.detect_head(raw_features)
+        return predictions
+
     def forward_stage_b(self, image: Tensor) -> object:
         # PRD 阶段 B 专用前向
         #
         # 数据流:
         #   MSICN (梯度流通) -> backbone_neck (no_grad) -> detect_head (no_grad)
-        #   FIE 在阶段 B 不参与前向  因为阶段 B 对齐的基准是 COCO 预训练检测器
+        #   FIE 在阶段 B 不参与前向  因为阶段 B 对齐的基准是阶段 A 训练好的纯 YOLO
         #
         # 调用方在切换到阶段 B 之前必须确保:
         #   1. apply_training_stage(model, STAGE_B) 已调用  确保 requires_grad 设置正确

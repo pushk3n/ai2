@@ -1,5 +1,23 @@
 from __future__ import annotations
 
+# --------------------------------------------------------
+# train.py — ICFIE-YOLO 三阶段训练入口
+#
+# 训练主线严格对应论文策略:
+#   初始化快照: 载入 yolov7.pt，记录迁移学习起点
+#   阶段 A: image -> backbone_neck -> detect_head
+#           先在低照度数据集上建立纯 YOLO 基线
+#   阶段 B: image -> MSICN -> frozen detector
+#           仅用检测损失驱动 MSICN 学习光照映射，不引入重建损失
+#   阶段 C: image -> MSICN -> backbone_neck -> FIE -> detect_head
+#           解冻全模型做端到端联合微调
+#
+# 对论文的工程化补充:
+#   1. 显式 requires_grad / train-eval 切换，避免只靠 optimizer 参数列表“假冻结”
+#   2. 对 PNG 元数据、混合精度、梯度裁剪和续训状态做显式处理
+#   3. FIE 保留数值稳定化实现，以支撑 Stage C 的 AMP 联合训练
+# --------------------------------------------------------
+
 import argparse
 import csv
 from contextlib import contextmanager
@@ -43,6 +61,7 @@ from yolo_wrapper import YOLOv7WrapperConfig, build_yolov7_components
 
 
 def configure_matplotlib_cjk_font() -> None:
+    # 训练过程会输出中文图标题和报告，需显式配置 CJK 字体，避免中文乱码。
     preferred_fonts = (
         "Noto Sans CJK JP",
         "Noto Sans CJK SC",
@@ -626,6 +645,8 @@ def load_hyperparameters(config: TrainConfig) -> dict[str, float]:
 
 
 def build_model(config: TrainConfig, device: torch.device, hyp: dict[str, float]) -> tuple[ICFIEYOLO, nn.Module, int, tuple[str, ...]]:
+    # 构建完整 ICFIE-YOLO：MSICN + YOLOv7 Backbone/Neck + FIE + Detect Head
+    # 注意这里的 FIE 默认开启，但是否真正参与训练由 apply_training_stage 控制。
     yolo_model, backbone_neck, detect_head, stride, _ = build_yolov7_components(config.yolo, device=device)
 
     # PRD 7.1: 若 use_grad_checkpoint=True，在 backbone_neck 上启用梯度检查点以节省显存
@@ -634,6 +655,8 @@ def build_model(config: TrainConfig, device: torch.device, hyp: dict[str, float]
     backbone_neck.use_grad_checkpoint = config.hardware.use_grad_checkpoint
 
     feature_channels = tuple(detect_head.expected_in_channels)
+    # 论文原始 FIE 输出为 3C；当前训练默认用 project_after_fusion=True，
+    # 通过 1x1 Conv 把输出投影回 C，以保持与 YOLOv7 检测头接口一致。
     fie_config = MultiScaleFIEConfig(
         feature_channels=feature_channels,
         per_scale=tuple(FIEBlockConfig() for _ in feature_channels),
@@ -685,8 +708,10 @@ def build_train_dataloader(
 
 
 def apply_training_stage(model: ICFIEYOLO, stage: TrainingStage) -> None:
-    # 显式设置每个模块的 requires_grad  状态符合 PRD 约束
+    # 显式设置每个模块的 requires_grad / train-eval 状态，严格对应论文三阶段训练策略。
+    # 这里不能只通过 optimizer 传入哪些参数来“间接冻结”，否则 BatchNorm/Dropout 等行为仍可能错误。
     if stage == TrainingStage.STAGE_A:
+        # 阶段 A: 训练纯 YOLO 基线，MSICN/FIE 完全旁路。
         set_module_requires_grad(model.backbone_neck, True)
         set_module_requires_grad(model.detect_head, True)
         set_module_requires_grad(model.msicn, False)
@@ -699,6 +724,8 @@ def apply_training_stage(model: ICFIEYOLO, stage: TrainingStage) -> None:
         return
 
     if stage == TrainingStage.STAGE_B:
+        # 阶段 B: 仅训练 MSICN。
+        # backbone/detect 必须冻结，但前向仍需保留梯度链路，让检测损失反传到 MSICN。
         set_module_requires_grad(model.msicn, True)
         set_module_requires_grad(model.backbone_neck, False)
         set_module_requires_grad(model.fie, False)
@@ -711,6 +738,7 @@ def apply_training_stage(model: ICFIEYOLO, stage: TrainingStage) -> None:
         return
 
     if stage == TrainingStage.STAGE_C:
+        # 阶段 C: 论文中的最终联合微调阶段，四层全部参与优化。
         set_module_requires_grad(model.msicn, True)
         set_module_requires_grad(model.backbone_neck, True)
         set_module_requires_grad(model.fie, True)
@@ -744,7 +772,7 @@ def forward_for_stage(model: ICFIEYOLO, images: Tensor, stage: TrainingStage) ->
     #         不经过 MSICN 和 FIE，建立纯 YOLO 基线
     # 阶段 B: 通过 ICFIEYOLO.forward_stage_b 保持四层边界
     #         backbone_neck 和 detect_head 已在 apply_training_stage 中切换到 eval
-    #         no_grad 包裹在 forward_stage_b 内部处理
+    #         不使用 no_grad 切断梯度，而是依赖 requires_grad=False 冻结检测器参数
     # 阶段 C: 正常全模型前向  四层均在 train 模式且梯度开放
     if stage == TrainingStage.STAGE_A:
         predictions = model.forward_stage_a(images)
@@ -910,6 +938,13 @@ def train_stage(
 
             should_step = (batch_index + 1) % accumulate_steps == 0 or (batch_index + 1) == len(dataloader)
             if should_step:
+                if config.optimizer.max_grad_norm > 0:
+                    # unscale_ 必须在 clip_grad_norm_ 之前，还原 AMP 缩放的梯度，否则裁剪阈值与实际梯度不在同一量纲
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None],
+                        max_norm=config.optimizer.max_grad_norm,
+                    )
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)

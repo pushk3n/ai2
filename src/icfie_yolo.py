@@ -73,6 +73,12 @@ class ICFIEYOLO(nn.Module):
     #   输入:  [P3, P4, P5] 的列表  每个元素为 (B, C, H, W)
     #          注意: 若 FIE 未投影  通道 C 为 3 * 原始通道
     #   输出:  任意形式的预测结果 (Tensor 或 Tensor tuple 均可)
+    #
+    # 论文主线映射:
+    #   Step 1: I_c = MSICN(I_in)                                  对应论文第 3.2 节
+    #   Step 2: [P3,P4,P5] = YOLOv7_BackboneNeck(I_c)             对应检测骨干特征抽取
+    #   Step 3: [P3',P4',P5'] = FIE([P3,P4,P5])                   对应论文第 3.3 节
+    #   Step 4: pred = DetectHead([P3',P4',P5'])                  对应检测输出
 
     def __init__(
         self,
@@ -108,6 +114,9 @@ class ICFIEYOLO(nn.Module):
         if detect_input_channels is None:
             return
 
+        # 显式通道断言是当前工程的重要安全检查。
+        # 论文原始 FIE 输出为 3C；若启用了 project_after_fusion，则输出回到 C。
+        # 这里必须在模型构造期就校验清楚，避免把通道不匹配的问题拖到训练时才暴露。
         expected_channels = self.fie.output_channels() if self.config.enable_fie else self.config.fie.feature_channels
         assert list(expected_channels) == list(detect_input_channels), (
             f"FIE 输出通道 {expected_channels} 与检测头期望通道 {detect_input_channels} 不匹配"
@@ -115,6 +124,8 @@ class ICFIEYOLO(nn.Module):
 
     def _align_corrected_image_dtype(self, corrected_image: Tensor) -> Tensor:
         # PRD 要求在 MSICN 与主干之间显式对齐 dtype
+        # 原因: Stage B / Stage C 中 backbone 可能处于 fp16 或混合精度状态，
+        # 而 MSICN 默认输出常为 fp32；若不显式对齐，后续卷积会发生 dtype mismatch。
         first_parameter = next(self.backbone_neck.parameters(), None)
         if first_parameter is None or corrected_image.dtype == first_parameter.dtype:
             return corrected_image
@@ -181,6 +192,7 @@ class ICFIEYOLO(nn.Module):
     def forward(self, image: Tensor, return_details: bool = False) -> Tensor | Dict[str, object]:
         # return_details=False: 只返回检测头的原始输出  用于正常训练/推理
         # return_details=True : 返回包含所有中间结果的字典  用于调试和可视化
+        # 这条 forward 严格保持论文推理主线顺序，不在串联层引入任何额外业务分支。
         details: Dict[str, object] = {}
 
         # ---- Step 1: MSICN 光照矫正 ----

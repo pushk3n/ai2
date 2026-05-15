@@ -55,6 +55,9 @@ class OptimizerConfig:
     weight_decay: float = 5e-4
     beta1: float = 0.937
     beta2: float = 0.999
+    # 梯度裁剪最大范数（L2 范数）。设为 0 禁用裁剪。
+    # YOLOv7 默认值为 10.0，Stage C 全模型解冻时梯度爆炸风险高，建议保留。
+    max_grad_norm: float = 10.0
 
     def __post_init__(self) -> None:
         if self.stage_a_lr <= 0:
@@ -213,6 +216,7 @@ def load_train_config(config_path: Path, *, project_root: Path) -> TrainConfig:
         weight_decay=float(optimizer_section.get("weight_decay", 5e-4)),
         beta1=float(optimizer_section.get("beta1", 0.937)),
         beta2=float(optimizer_section.get("beta2", 0.999)),
+        max_grad_norm=float(optimizer_section.get("max_grad_norm", 10.0)),
     )
 
     schedule_section = _require_mapping("schedule", root.get("schedule"))

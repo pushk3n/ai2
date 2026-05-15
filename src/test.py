@@ -17,7 +17,13 @@ from __future__ import annotations
 # 运行方式:
 #   python src/test.py
 #
-# 如需切换测试图片  直接修改下方宏定义即可
+# 配置方式:
+#   1. 先在项目根目录下创建 test_sample/，放入待测图片。
+#   2. 修改 TARGET_IMAGE_NAME 选择图片。
+#   3. 修改 YOLO_WEIGHTS_PATH 指向 yolov7/yolov7.pt。
+#   4. 按 ENABLE_FIE 选择对应 checkpoint:
+#      ENABLE_FIE=True  -> ICFIE_CHECKPOINT_PATH 指向 stage_c_epoch_N.pt
+#      ENABLE_FIE=False -> YOLO_ONLY_CHECKPOINT_PATH 指向 stage_a_epoch_N.pt
 # --------------------------------------------------------
 
 from pathlib import Path
@@ -25,6 +31,7 @@ import sys
 
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 import numpy as np
 import torch
@@ -40,17 +47,13 @@ from icfie_yolo import (
 	ICFIEYOLO,
 	ICFIEYOLOConfig,
 )
-from infer import (
-	configure_matplotlib_cjk_font,
-	tensor_to_numpy_image,
-)
 from yolo_wrapper import YOLOv7WrapperConfig, build_yolov7_components
 from utils.datasets import letterbox
 from utils.general import non_max_suppression, scale_coords
 
 
 # ================================================================
-# 宏定义区: 需要测试哪张图  直接改这里
+# 宏定义区: 所有与测试图片 / 权重 / 推理行为相关的配置都集中放在这里
 # ================================================================
 
 TARGET_IMAGE_NAME = "mc.jpg"
@@ -63,20 +66,20 @@ CONF_THRES: float = 0.25
 IOU_THRES: float = 0.45
 YOLO_CFG_PATH = YOLOV7_ROOT / "cfg" / "training" / "yolov7.yaml"
 
-YOLO_WEIGHTS_PATH: Path | None = YOLOV7_ROOT / "yolov7.pt"  	# yolov7 官方预训练权重  需要先下载放到 yolov7/ 目录下
+YOLO_WEIGHTS_PATH: Path | None = YOLOV7_ROOT / "yolov7.pt"  	# YOLOv7 官方预训练权重  需要放到 yolov7/ 目录下
 
-# 训练出来的权重路径  需要先训练好模型并修改这里的路径
+# 训练出来的权重路径  需要先训练好模型并改成你自己的 run_dir
 # 注意: 不同 FIE 开关状态需要使用不同 checkpoint:
 #   ENABLE_FIE=True  → 使用 Stage C checkpoint (backbone+FIE+detect 联合微调)
 #   ENABLE_FIE=False → 使用 Stage A checkpoint (纯 YOLO baseline，backbone+detect 无 FIE 预训练)
 # 若 FIE 禁用时仍加载 Stage C checkpoint，detect head 期望的是 FIE 输出特征分布，
 # 收到原始 backbone 特征后置信度全部偏低，NMS 将滤除所有框。
-ICFIE_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13-a1-b1-c1" / "stage_c_epoch_1.pt"
+ICFIE_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-15-a1-b10-c10" / "stage_c_epoch_10.pt"
 
 # 纯 YOLO 模式（ENABLE_FIE=False）专用 checkpoint
 # 重新训练后指向 stage_a_epoch_<N>.pt（Stage A 训练完成后生成）
 # 若设为 None 且 ENABLE_FIE=False，只保留 yolov7.pt 主干权重（检测头为随机初始化，12 类可能无法检出）
-YOLO_ONLY_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-13-a1-b1-c1" / "stage_a_epoch_1.pt"
+YOLO_ONLY_CHECKPOINT_PATH: Path | None = PROJECT_ROOT / "runs" / "icfie_yolo-5-15-a1-b10-c10" / "stage_a_epoch_1.pt"
 
 YOLO_NUM_CLASSES: int | None = 12	# 这里需要与训练配置中的 dataset.num_classes 保持一致  否则会导致模型加载失败或推理错误
 
@@ -91,6 +94,50 @@ EXDARK_CLASS_NAMES: list[str] = [
 
 INPUT_DIR = PROJECT_ROOT / "test_sample"
 OUTPUT_DIR = PROJECT_ROOT / "results" / "single_image_pipeline"
+
+
+def configure_matplotlib_cjk_font() -> None:
+	# infer.py 已被移除，测试脚本直接内聚最小字体配置逻辑，避免再依赖已删除模块。
+	preferred_fonts = (
+		"Noto Sans CJK JP",
+		"Noto Sans CJK SC",
+		"Noto Serif CJK SC",
+		"Source Han Sans SC",
+		"WenQuanYi Zen Hei",
+		"Microsoft YaHei",
+		"SimHei",
+		"PingFang SC",
+		"Droid Sans Fallback",
+	)
+	available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+
+	selected_font = None
+	for preferred_font in preferred_fonts:
+		selected_font = next((name for name in available_fonts if preferred_font in name), None)
+		if selected_font is not None:
+			break
+
+	if selected_font is None:
+		print("[警告 Warning] 未找到可用中文字体 / no CJK font found for Matplotlib")
+		return
+
+	plt.rcParams["font.family"] = "sans-serif"
+	plt.rcParams["font.sans-serif"] = [selected_font, "DejaVu Sans"]
+	plt.rcParams["axes.unicode_minus"] = False
+
+
+def tensor_to_numpy_image(image_tensor: Tensor) -> np.ndarray:
+	# 把模型中的图像张量还原为 matplotlib 可显示的 RGB numpy 图像。
+	# 约束与 MSICN 输出一致：输入 shape 为 (1,3,H,W) 或 (3,H,W)，数值范围期望在 [0,1]。
+	if image_tensor.ndim == 4:
+		if image_tensor.size(0) != 1:
+			raise ValueError(f"仅支持 batch=1 的图像可视化，实际得到 shape={tuple(image_tensor.shape)}")
+		image_tensor = image_tensor.squeeze(0)
+	if image_tensor.ndim != 3 or image_tensor.size(0) != 3:
+		raise ValueError(f"期望图像张量 shape 为 (3,H,W)，实际得到 {tuple(image_tensor.shape)}")
+
+	image = image_tensor.detach().float().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
+	return image
 
 
 def build_output_stem(image_stem: str, enable_msicn: bool, enable_fie: bool) -> str:
@@ -143,7 +190,10 @@ def split_prediction_outputs(predictions: object) -> tuple[Tensor | None, list[T
 
 def load_yolo_image_as_tensor(path: Path, img_size: int, stride: int) -> tuple[Tensor, np.ndarray]:
 	"""
-	加载 YOLO 模型输入图像为张量
+	加载 YOLO 模型输入图像为张量。
+
+	这里沿用 YOLOv7 标准 letterbox 预处理，保证 test.py 的单图测试
+	与 eval.py 和官方推理链路的输入分布一致。
 	"""
 	image_bgr = cv2.imread(str(path))
 	if image_bgr is None:
@@ -269,6 +319,7 @@ def save_pipeline_visualization(
 def build_model(device: torch.device) -> tuple[ICFIEYOLO, int, list[str]]:
 	# 使用真实 YOLOv7 Backbone/Neck + Detect 头接入 ICFIEYOLO
 	# 返回 (model, stride, class_names)  stride 用于 letterbox 预处理
+	# 这里默认把 FIE 输出投影回检测头所需通道，便于直接复用当前训练好的检测头参数。
 	_, backbone, detect_head, stride, class_names = build_yolov7_components(
 		YOLOv7WrapperConfig(
 			cfg_path=YOLO_CFG_PATH,
@@ -321,7 +372,10 @@ def run_single_image_pipeline() -> None:
 
 	image_path = INPUT_DIR / TARGET_IMAGE_NAME
 	if not image_path.exists():
-		raise FileNotFoundError(f"未找到测试图像: {image_path}")
+		raise FileNotFoundError(
+			f"未找到测试图像: {image_path}\n"
+			"请先在项目根目录下创建 test_sample/，再把待测图片放进去。"
+		)
 
 	OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 	pipeline_dir = OUTPUT_DIR / "pipeline_visualization"

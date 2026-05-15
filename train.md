@@ -4,6 +4,55 @@
 
 ---
 
+## 0. 快速上手
+
+### 0.1 路径约定
+
+本文档中的路径均默认**相对项目根目录**书写，例如：
+
+1. `yolov7/yolov7.pt`
+2. `runs/your_run_dir/stage_c_epoch_5.pt`
+3. `data/Exdark/val.txt`
+4. `test_sample/your_image.jpg`
+
+除 [data-process.py](data-process.py) 中填写原始 ExDark 数据目录外，不再使用 `/home/...` 这类机器绑定的绝对路径示例。
+
+### 0.2 测试、对比、评估分别改哪里
+
+#### `src/test.py`
+
+顶部宏定义里重点看 4 项：
+
+1. `TARGET_IMAGE_NAME`：你放到 `test_sample/` 里的图片文件名。
+2. `YOLO_WEIGHTS_PATH`：结构初始化权重，通常写 `yolov7/yolov7.pt`。
+3. `ICFIE_CHECKPOINT_PATH`：完整模型测试使用，写 `runs/<你的实验目录>/stage_c_epoch_N.pt`。
+4. `YOLO_ONLY_CHECKPOINT_PATH`：纯 YOLO 测试使用，写 `runs/<你的实验目录>/stage_a_epoch_N.pt`。
+
+权重选择规则：
+
+1. `ENABLE_FIE=True` 时配 `stage_c_epoch_N.pt`。
+2. `ENABLE_FIE=False` 时配 `stage_a_epoch_N.pt`。
+
+#### `src/test-compri.py`
+
+这个脚本不单独配权重，也不单独配图片路径，完全复用 `src/test.py` 顶部配置。先改好 `src/test.py`，再运行它。
+
+#### `src/eval.py`
+
+顶部宏定义里重点看 5 项：
+
+1. `MODE`：`single` 或 `batch`。
+2. `CHECKPOINT_PATH`：按 `ENABLE_FIE` 选择 `stage_c_epoch_N.pt` 或 `stage_a_epoch_N.pt`。
+3. `YOLOV7_WEIGHTS_PATH`：通常是 `yolov7/yolov7.pt`。
+4. `SINGLE_IMAGE_PATH`：单图模式图片路径。
+5. `VAL_TXT`：批量模式验证集列表路径。
+
+### 0.3 test_sample 目录说明
+
+仓库后续不再携带演示样张。请在项目根目录自行创建 `test_sample/`，再把待测图片放进去。
+
+---
+
 ## 1. 训练依据
 
 ### 1.1 问题背景
@@ -165,6 +214,7 @@ ICFIE-YOLO 的训练实际包含一个初始化快照步骤和三个训练阶段
 | `weight_decay` | 0.0005 | Adam 权重衰减（L2 正则化系数） |
 | `beta1` | 0.937 | Adam 一阶矩参数，YOLOv7 默认值 |
 | `beta2` | 0.999 | Adam 二阶矩参数 |
+| `max_grad_norm` | 10.0 | 梯度裁剪最大 L2 范数；设为 0 表示关闭裁剪，主要用于抑制阶段 C 全量解冻后的梯度爆炸 |
 
 调度策略：每个阶段内使用 **CosineAnnealingLR**，从 `lr`（或 `stage_c_lr`）余弦衰减到 `min_lr`。
 
@@ -172,6 +222,7 @@ ICFIE-YOLO 的训练实际包含一个初始化快照步骤和三个训练阶段
 
 - 阶段 A 当前默认使用 `stage_a_lr=1e-4`，原因是直接用 `1e-2` 级别学习率去微调整个 YOLOv7 backbone，极易在第一轮就把特征分布训塌，表现为不同输入得到几乎相同的 P3/P4/P5 特征图与极低的 objectness 分数。
 - 阶段 B 仍沿用 `lr`，因为此时只训练 MSICN，参数规模小且不会直接破坏预训练 backbone。
+- 阶段 C 默认启用 `max_grad_norm=10.0`。原因是全模型解冻后 FIE 的大通道卷积更容易出现梯度爆炸，表现为训练中途出现 `non-finite loss: nan`。当前训练入口会在 AMP 的 `scaler.step()` 前先 `unscale_` 再执行梯度裁剪。
 
 ### 3.6 训练阶段轮数（`schedule`）
 
@@ -283,19 +334,20 @@ cat runs/icfie_yolo-5-13/training_metrics.csv
 
 ### 6.2 训练结束后：目标检测指标
 
-训练完成后，用以下命令在 ExDark 验证集上计算标准目标检测评估指标：
+训练完成后，优先使用 `src/eval.py` 在 ExDark 验证集上计算标准目标检测评估指标。该脚本直接复用 ICFIE-YOLO 四层推理链路，支持 `stage_c_epoch_N.pt` 这类顶层模型 checkpoint。
 
 ```bash
-# 使用 YOLOv7 官方 test.py 评估（推荐）
-cd yolov7
-python test.py \
-  --data ../configs/train.yaml \
-  --weights ../runs/icfie_yolo-5-13/stage_c_epoch_N.pt \
-  --img-size 416 \
-  --batch-size 4 \
-  --task val \
-  --name icfie_eval
+# 使用本项目 eval.py 评估（推荐，支持 ICFIE-YOLO 完整模型）
+# 先按需修改 src/eval.py 顶部宏定义：
+#   MODE = "batch"
+#   CHECKPOINT_PATH = "runs/your_run_dir/stage_c_epoch_N.pt"
+#   DEVICE = "cuda:0"
+python src/eval.py
 ```
+
+补充说明：当前训练产物中的 `stage_a_epoch_N.pt`、`stage_b_epoch_N.pt`、`stage_c_epoch_N.pt` 保存的是 `ICFIEYOLO` 顶层状态字典，不是原生 YOLOv7 `Model` 权重格式，因此**不能直接**拿 `stage_c_epoch_N.pt` 去跑 YOLOv7 官方 `test.py`。
+
+如果你只想对纯 YOLO 基线做参考对比，应优先使用本项目的 `src/eval.py` 并设置 `ENABLE_FIE=False`，同时将 `CHECKPOINT_PATH` 指向 `stage_a_epoch_N.pt`。原生 YOLOv7 官方 `test.py` 只适合评估与其模型结构完全一致的权重。
 
 核心评估指标说明：
 
@@ -329,7 +381,7 @@ python test.py \
 
 1. **无 NaN / Inf 损失**：训练脚本在出现非有限损失时会立即抛出 RuntimeError，若训练正常结束说明数值稳定。
 2. **阶段 A 基线可用，阶段 B 继续收敛**：阶段 A 训练后纯 YOLO 基线应能正常输出检测结果；进入阶段 B 后，`total_loss` 相比阶段 A 后期不应明显恶化，通常会继续下降。
-3. **阶段 C mAP@0.5 ≥ 基线**：用 YOLOv7 官方评估脚本，确认 `stage_c_epoch_N.pt` 的 mAP@0.5 不低于直接在 ExDark 上微调的 YOLOv7 基线。
+3. **阶段 C mAP@0.5 ≥ 基线**：用 `src/eval.py` 评估，确认 `stage_c_epoch_N.pt` 的 mAP@0.5 不低于直接在 ExDark 上微调的 YOLOv7 基线。
 4. **Recall 提升**：低照度目标检测中 Recall 是比 Precision 更重要的指标（漏检代价高），论文目标是 Recall 比现有方法提升 ≥4.2pp。
 
 ---
@@ -339,7 +391,6 @@ python test.py \
 ### 单卡训练（4060 等单卡环境）
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
 
@@ -350,14 +401,12 @@ python src/train.py --config configs/train.yaml
 方式 1：命令行显式指定 checkpoint。
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml --resume runs/your_run_dir/stage_c_epoch_2.pt
 ```
 
 方式 2：自动从当前 `run_dir` 中选择最新 checkpoint。
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml --resume
 ```
 
@@ -378,7 +427,6 @@ resume_from: runs/your_run_dir/stage_c_epoch_2.pt
 ### 多卡 DDP 训练（双 3090 等多卡环境）
 
 ```bash
-cd /home/pushk3n/github-ai2
 torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 ```
 
@@ -396,4 +444,6 @@ schedule:
 hardware:
   batch_size: 4        # 4060 单卡保持 4；3090 单卡可提升到 16
   accumulate_steps: 4  # 等效 batch=16，3090 可降为 1
+optimizer:
+  max_grad_norm: 10.0  # 建议保留；阶段 C 全量解冻时用于抑制梯度爆炸
 ```

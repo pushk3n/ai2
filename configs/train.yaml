@@ -1,5 +1,5 @@
 seed: 42
-run_dir: runs/icfie_yolo-5-13-a1-b1-c1
+run_dir: runs/icfie_yolo-5-15-a1-b1-c5
 hyp_path: yolov7/data/hyp.scratch.p5.yaml
 project_after_fusion: true
 normalize_png_before_train: true
@@ -61,9 +61,10 @@ optimizer:
   weight_decay: 0.0005
   beta1: 0.937
   beta2: 0.999
+  max_grad_norm: 10.0
 schedule:
   stage_a_epochs: 1
   stage_b_epochs: 1
-  stage_c_epochs: 1
+  stage_c_epochs: 5
 visualization:
   batch_log_interval: 25

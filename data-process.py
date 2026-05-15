@@ -3,12 +3,13 @@ ExDark 数据集预处理脚本
 将原始 ExDark 数据集转换为 YOLO 格式，并更新训练配置，之后可直接启动训练。
 
 使用方法：
-    cd /home/pushk3n/github-ai2
+    在项目根目录执行
     python data-process.py
 
 前提条件：
     1. 下载 ExDark 图像集并解压，确保 EXDARK_IMG_DIR 路径正确。
     2. 下载 ExDark 标注文件（ExDark_Annno），确保 EXDARK_ANNO_DIR 路径正确。
+    3. 原始 ExDark 数据不要求放在项目目录内；这里只需要把宏定义改成你的真实数据路径。
 
 ExDark 标注文件格式（bbGt version=3，文件名 = 图像文件名 + .txt）：
     % bbGt version=3
@@ -43,11 +44,12 @@ from __future__ import annotations
 # ============================================================
 
 # ExDark 图像根目录（内含 12 个类别子目录，每目录下存放 .jpg/.png 图像）
-EXDARK_IMG_DIR = "/home/pushk3n/桌面/Exdark/ExDark/ExDark"
+# 说明: 原始数据集可以放在项目外部任意位置，这里写你的真实绝对路径即可。
+EXDARK_IMG_DIR = "/path/to/your/ExDark/images"
 
 # ExDark 标注根目录（内含 12 个类别子目录，每目录下存放与图像同名的 .txt 标注文件）
 # 标注文件命名规则：<原始图像文件名>.txt（保留图像扩展名），如 2015_00001.jpg.txt
-EXDARK_ANNO_DIR = "/home/pushk3n/桌面/Exdark/ExDark_Annno/ExDark_Annno"
+EXDARK_ANNO_DIR = "/path/to/your/ExDark_Annno"
 
 # 预处理输出目录（相对工作目录 github-ai2/）
 OUTPUT_DIR = "data/Exdark"

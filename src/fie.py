@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
+
 # --------------------------------------------------------
 # FIE - Feature Interacted Enhancement
 # 特征交互增强模块
 #
 # 论文出处: 基于ICFIE-YOLO的低照度图像目标检测方法
+# 论文位置: 第 3.3 节, 对应 docs/prd2.md 中整理的公式(3)、公式(4)
 #
 # 核心思路:
 #   低照度图像经过主干网络提取的特征图中存在大量背景噪声和弱目标特征
@@ -26,6 +29,14 @@ from __future__ import annotations
 #   MultiScaleFIE 对 P3/P4/P5 分别独立应用 FIEBlock
 #   特征通道数分别为 (256, 512, 1024)  输出变为 (768, 1536, 3072)
 #   若设置 project_after_fusion=True 则再 1x1 Conv 投影回原通道数
+#
+# 与论文原始实现的区别:
+#   1. 论文原式只要求建立空间/通道关联并输出 f_s、f_c，再与原特征 f 做 concat。
+#   2. 本工程在注意力 logits 上额外加入 sqrt(d) 缩放，并用 fp32 执行 softmax，
+#      这是为了解决 Stage C + AMP 混合精度训练时的数值溢出问题，属于实现层稳定化增强，
+#      不改变公式(3)(4)所表达的空间/通道关联建模目标。
+#   3. project_after_fusion=True 时额外使用 1x1 Conv 把 3C 投影回 C，便于直接复用
+#      YOLOv7 原始检测头接口；这同样是工程适配选项，不属于论文原始拓扑。
 #
 # 可训练参数:
 #   空间交互分支 (Spatial):     Q, K, V 的 1x1 投影卷积
@@ -123,12 +134,13 @@ class SpatialInteractionEnhancement(nn.Module):
     #       让每个像素的特征都能感知到来自其他位置的上下文信息
     #       对低照度图像: 目标像素可以从周围较亮区域借取特征  增强可见性
     #
-    # 实现方式 (Non-local self-attention):
+    # 实现方式 (论文公式(3)对应的空间交互增强):
     #   Q = 1x1 Conv(f)  shape: (B,C,H,W) -> (B, inter_C, H, W) -> (B, HW, inter_C)
     #   K = 1x1 Conv(f)  同 Q  保持 (B, inter_C, HW)
     #   V = 1x1 Conv(f)  shape: (B, C, H, W) -> (B, HW, C)
     #   Attention = softmax(Q @ K^T / temperature)  shape: (B, HW, HW)
-    #   Output = (Attention @ V) reshape -> (B, C, H, W)
+    #   f_s = Re(Attention @ V) reshape -> (B, C, H, W)
+    #   其中 Re 表示论文中的 reshape / 重排回原空间布局
     #
     # 计算量提醒:
     #   Q @ K^T 矩阵: O(B * (HW)^2 * inter_C)
@@ -147,6 +159,11 @@ class SpatialInteractionEnhancement(nn.Module):
         super().__init__()
         inter_channels = max(config.min_inter_channels, in_channels // config.reduction_ratio)
         self.temperature = config.attention_temperature
+        # 工程实现差异说明:
+        # 论文公式(3)只强调空间关联矩阵 u = Softmax(q ⊗ c^T)。
+        # 这里额外引入 sqrt(d_k) 缩放，是标准 scaled dot-product attention 的稳定化写法，
+        # 用于抑制 AMP/FP16 下 logits 过大导致的 softmax 溢出，不改变论文的空间关联建模目标。
+        self.scale: float = math.sqrt(inter_channels)
         # Q: 查询投影  通道压缩到 inter_channels
         self.query_proj = nn.Conv2d(in_channels, inter_channels, kernel_size=1, bias=config.use_bias)
         # K: 键投影  与 Q 相同维度  用于被查询匹配
@@ -163,16 +180,22 @@ class SpatialInteractionEnhancement(nn.Module):
         # (B, inter_C, H, W) -> flatten(2) -> (B, inter_C, HW)  不转置  便于 bmm
         key = self.key_proj(feature).flatten(2)    # (B, inter_C, HW)
 
-        # bmm: (B, HW, inter_C) @ (B, inter_C, HW) = (B, HW, HW)
-        # 元素 attention[b,i,j] = 位置 i 对位置 j 的注意力权重 (归一化后)
-        attention_logits = torch.bmm(query, key) / self.temperature    # (B, HW, HW)
-        attention = torch.softmax(attention_logits, dim=-1)    # (B, HW, HW)
+        # 论文公式(3)中的空间关联矩阵 u:
+        #   u = Softmax(q ⊗ c^T)
+        # 此处实现为 batch matrix multiply。
+        # 元素 attention[b,i,j] 表示位置 i 对位置 j 的关联强度。
+        # 除以 sqrt(inter_C) * temperature 属于工程稳定化实现，不改变公式语义。
+        attention_logits = torch.bmm(query, key) / (self.scale * self.temperature)    # (B, HW, HW)
+        # 工程实现差异说明:
+        # softmax 先转成 fp32 再映射回原 dtype，避免混合精度训练中的非有限值。
+        attention = torch.softmax(attention_logits.float(), dim=-1).to(query.dtype)    # (B, HW, HW)
 
         # (B, C, H, W) -> flatten(2) -> (B, C, HW) -> transpose -> (B, HW, C)
         value = self.value_proj(feature).flatten(2).transpose(1, 2)    # (B, HW, C)
 
-        # bmm: (B, HW, HW) @ (B, HW, C) = (B, HW, C)
-        # 每个位置的输出 = 对全图所有位置的 value 做加权聚合
+        # 论文公式(3)后半段:
+        #   f_s = Re(u ⊗ Flatten(d))
+        # 即每个空间位置对全图 value 特征做加权聚合，再重排回 (B,C,H,W)。
         enhanced = torch.bmm(attention, value)    # (B, HW, C)
         # 转置 + reshape 恢复空间结构
         enhanced = enhanced.transpose(1, 2).reshape(batch_size, channels, height, width)    # (B, C, H, W)
@@ -188,15 +211,15 @@ class ChannelInteractionEnhancement(nn.Module):
     # 作用: 建立特征通道之间的语义关联
     #       让每个通道感知其他语义相关通道的信息  同时抑制无关 (噪声) 通道
     #
-    # 实现方式 (Channel self-attention with spatial compression):
+    # 实现方式 (论文公式(4)对应的通道交互增强):
     #   stride-2 Conv 将 HxW 压为 (H/2)x(W/2)  减少矩阵乘法量
     #   Q = stride-2 Conv(f) -> flatten -> (B, C, HW/4)
     #   K = stride-2 Conv(f) -> flatten -> (B, C, HW/4)
     #   V = stride-2 Conv(f) -> flatten -> (B, C, HW/4)
     #   Channel_Attn = softmax(K @ Q^T / temp)  shape: (B, C, C)
     #     注意乘法顺序: K @ Q^T  对应论文通道注意力的标准写法
-    #   Enhanced_half = Channel_Attn @ V_flat  -> reshape -> (B, C, H/2, W/2)
-    #   Enhanced = upsample(Enhanced_half, size=(H,W))  -> (B, C, H, W)
+    #   f_c_half = Channel_Attn @ V_flat  -> reshape -> (B, C, H/2, W/2)
+    #   f_c = upsample(f_c_half, size=(H,W))  -> (B, C, H, W)
     #
     # 输入 shape:  (B, C, H, W)
     # 输出 shape:  (B, C, H, W)
@@ -219,7 +242,8 @@ class ChannelInteractionEnhancement(nn.Module):
             "padding": config.compression_padding,
             "bias": config.use_bias,
         }
-        # Q/K/V 三路并联压缩卷积  参数独立  允许各自学习不同投影方向
+        # 论文公式(4)里 x、y、z 三路投影在这里分别对应 query/key/value。
+        # stride=2 是论文给出的空间压缩步骤，先降采样再做通道关联，减少 CxC 注意力计算的输入长度。
         self.query_proj = nn.Conv2d(in_channels, in_channels, **conv_kwargs)
         self.key_proj = nn.Conv2d(in_channels, in_channels, **conv_kwargs)
         self.value_proj = nn.Conv2d(in_channels, in_channels, **conv_kwargs)
@@ -236,17 +260,24 @@ class ChannelInteractionEnhancement(nn.Module):
         query_flat = query.flatten(2)    # (B, C, hw)
         key_flat = key.flatten(2)        # (B, C, hw)
 
-        # bmm: (B, C, hw) @ (B, hw, C) = (B, C, C)
-        # 元素 channel_attention[b,i,j] = 通道 i 与通道 j 的相关性
-        channel_attention_logits = torch.bmm(key_flat, query_flat.transpose(1, 2)) / self.temperature    # (B, C, C)
-        channel_attention = torch.softmax(channel_attention_logits, dim=-1)    # (B, C, C)
+        # 论文公式(4)中的通道关联矩阵 n:
+        #   n = Softmax(y^T ⊗ p)
+        # 这里使用 key_flat @ query_flat^T 进行实现。
+        # 除以 sqrt(hw) * temperature 属于工程稳定化实现，用于控制 logits 数值尺度。
+        channel_scale = math.sqrt(query_flat.size(-1))
+        channel_attention_logits = torch.bmm(key_flat, query_flat.transpose(1, 2)) / (channel_scale * self.temperature)    # (B, C, C)
+        # 与空间分支相同，softmax 先在 fp32 中执行，这是本工程对论文原式的数值稳定化实现。
+        channel_attention = torch.softmax(channel_attention_logits.float(), dim=-1).to(query_flat.dtype)    # (B, C, C)
 
         value_flat = value.flatten(2)    # (B, C, hw)
-        # bmm: (B, C, C) @ (B, C, hw) = (B, C, hw)
-        # 每个通道的输出 = 对所有通道的 value 做加权融合
+        # 论文公式(4)后半段:
+        #   f_c = Re(Flatten(z) ⊗ n)
+        # 先在压缩空间中完成通道聚合，再恢复到原始分辨率。
         enhanced_half = torch.bmm(channel_attention, value_flat).reshape_as(value)    # (B, C, H/2, W/2)
 
-        # 上采样恢复至原始空间尺寸  使输出能与原始特征 cat
+        # 工程实现差异说明:
+        # 论文中的 Re 只要求恢复回与输入特征对齐的空间布局。
+        # 当前实现显式使用 F.interpolate 做上采样，以确保 f_c 能与 f、f_s 在 concat 前严格对齐。
         enhanced = F.interpolate(
             enhanced_half,
             size=original_size,
@@ -267,6 +298,8 @@ class FIEBlock(nn.Module):
     # 单尺度 FIE 模块
     #
     # 整合空间分支和通道分支  最后 cat 得到融合特征
+    # 对应论文图 5 的单尺度 FIE 结构:
+    #   f_out = cat([f, f_s, f_c], dim=1)
     # fused_channels = N * in_channels
     #   N = int(keep_original) + int(enable_spatial) + int(enable_channel)
     # 默认配置: N=3  fused_channels = 3 * in_channels
@@ -324,7 +357,7 @@ class FIEBlock(nn.Module):
         if not fused_parts:
             raise ValueError("FIEBlock 至少需要保留原始特征或开启一个增强分支")
 
-        # 通道维度拼接  (B, N*C, H, W)
+        # 论文融合步骤: cat([f, f_s, f_c], dim=1)
         fused_feature = torch.cat(fused_parts, dim=1)
 
         if not return_details:
@@ -341,6 +374,7 @@ class MultiScaleFIE(nn.Module):
     #
     # 可选投影层:
     #   project_after_fusion=True:  1x1 Conv 投影  适配不修改检测头的场景
+    #                               这是工程适配，不属于论文原始拓扑
     #   project_after_fusion=False: 直接输出 3C  论文原始设计  需修改检测头
     #
     # 输入 shapes:  [(B,C1,H1,W1), (B,C2,H2,W2), (B,C3,H3,W3)]
@@ -364,7 +398,8 @@ class MultiScaleFIE(nn.Module):
 
         projection_channels = self.config.projection_channels or self.config.feature_channels
         if self.config.project_after_fusion:
-            # 投影层: 将融合后的 3C 通道压回 projection_channels
+            # 工程适配分支: 将论文原始的 3C 融合输出压回检测头所需通道数。
+            # 这样可以避免直接改动 YOLOv7 原生 IDetect 的输入通道定义。
             self.projections = nn.ModuleList(
                 [
                     nn.Conv2d(block.fused_channels, out_channels, kernel_size=1, bias=self.config.projection_use_bias)

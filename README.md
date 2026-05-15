@@ -9,7 +9,7 @@
 - **FIE**（`src/fie.py`）：空间交互增强 + 通道交互增强，抑制低照度特征噪声
 - **Detect Head**（`src/detect.py`）：适配 FIE 输出通道的检测头
 
-**训练策略：**　三阶段对齐训练 — 保存预训练初始化快照 → 纯 YOLO 基线训练（阶段 A）→ 仅优化 MSICN（阶段 B）→ 全模型微调（阶段 C），详细说明见 [docs/train.md](docs/train.md)。
+**训练策略：**　三阶段对齐训练 — 保存预训练初始化快照 → 纯 YOLO 基线训练（阶段 A）→ 仅优化 MSICN（阶段 B）→ 全模型微调（阶段 C），详细说明见 [train.md](train.md)。
 
 ---
 
@@ -62,9 +62,85 @@ pip install -r requirements.txt
 1. 根目录 [requirements.txt](requirements.txt) 不再直接声明 `torch`，避免把你已经安装好的 CUDA 匹配版本覆盖掉。
 2. 训练依赖仍然以 [yolov7/requirements.txt](yolov7/requirements.txt) 为主，根目录依赖补充本项目脚本直接使用的库。
 
-### 解压测试集
+### 创建测试图片目录
+
+仓库后续不再附带演示样张。请在项目根目录自行创建 `test_sample/`，然后把你要测试的图片放进去。
+
+推荐结构：
+
+```text
+test_sample/
+	your_image_1.jpg
+	your_image_2.png
+```
+
+`src/test.py` 和 `src/test-compri.py` 都默认从这个目录取图。
+
+### 测试与评估快速上手
+
+这三个脚本的配置入口不同，但都遵循同一条规则：**路径优先写成相对项目根目录的形式，权重按训练阶段选择对应的 .pt 文件。**
+
+#### 1. 单图测试：`src/test.py`
+
+需要改的宏定义都在文件顶部：
+
+1. `TARGET_IMAGE_NAME`：`test_sample/` 里的文件名。
+2. `YOLO_WEIGHTS_PATH`：YOLOv7 结构初始化权重，通常是 `yolov7/yolov7.pt`。
+3. `ICFIE_CHECKPOINT_PATH`：完整模型测试时使用，指向 `runs/<你的实验目录>/stage_c_epoch_N.pt`。
+4. `YOLO_ONLY_CHECKPOINT_PATH`：纯 YOLO 测试时使用，指向 `runs/<你的实验目录>/stage_a_epoch_N.pt`。
+5. `ENABLE_MSICN` / `ENABLE_FIE`：控制是否走完整 ICFIE-YOLO 链路。
+
+权重选择规则：
+
+1. `ENABLE_FIE=True` 时，加载 `stage_c_epoch_N.pt`。
+2. `ENABLE_FIE=False` 时，加载 `stage_a_epoch_N.pt`。
+3. 不要在 `ENABLE_FIE=False` 时继续使用 `stage_c_epoch_N.pt`，否则 detect head 输入分布不匹配，NMS 往往会把框全部滤掉。
+
+运行命令：
+
 ```bash
-unzip test_images.zip -d test_images
+python src/test.py
+```
+
+#### 2. 四组合对比：`src/test-compri.py`
+
+这个脚本**不单独维护路径和权重**，它完全复用 `src/test.py` 顶部的宏定义。
+
+所以使用顺序是：
+
+1. 先把 `src/test.py` 里的图片名、`YOLO_WEIGHTS_PATH`、`ICFIE_CHECKPOINT_PATH`、`YOLO_ONLY_CHECKPOINT_PATH` 配好。
+2. 再运行 `python src/test-compri.py`。
+
+它会自动依次测试四种组合：
+
+1. 纯 YOLO
+2. 只开 MSICN
+3. 只开 FIE
+4. MSICN + FIE 全开
+
+运行命令：
+
+```bash
+python src/test-compri.py
+```
+
+#### 3. 指标评估：`src/eval.py`
+
+同样只改顶部宏定义：
+
+1. `MODE`：单图评估用 `single`，验证集批量评估用 `batch`。
+2. `CHECKPOINT_PATH`：
+	 `ENABLE_FIE=True` 时用 `stage_c_epoch_N.pt`；
+	 `ENABLE_FIE=False` 时用 `stage_a_epoch_N.pt`。
+3. `YOLOV7_WEIGHTS_PATH`：通常写 `yolov7/yolov7.pt`。
+4. `SINGLE_IMAGE_PATH`：单图模式下的图片路径，例如 `test_sample/your_image.jpg`。
+5. `VAL_TXT`：批量模式下的验证集列表，例如 `data/Exdark/val.txt`。
+6. `REPORT_DIR`：评估报告输出目录。
+
+运行命令：
+
+```bash
+python src/eval.py
 ```
 
 ### ExDark 数据预处理
@@ -75,6 +151,8 @@ unzip test_images.zip -d test_images
 
 1. `EXDARK_IMG_DIR`：ExDark 图像目录。
 2. `EXDARK_ANNO_DIR`：ExDark 标注目录。
+
+说明：原始 ExDark 数据可以放在项目目录外部任意位置，脚本顶部允许你直接填写外部绝对路径；这里是本仓库里唯一保留“可指向项目外部目录”的场景。
 
 ExDark 原始标注不是 YOLO 格式，实际格式为：
 
@@ -98,7 +176,6 @@ class_id x_center y_center width height
 运行命令：
 
 ```bash
-cd /home/pushk3n/github-ai2
 python data-process.py
 ```
 
@@ -113,7 +190,7 @@ python data-process.py
 
 ### 训练介绍
 
-完整的训练原理、参数说明与结果评判方法见 **[docs/train.md](docs/train.md)**，这里仅列出快速参考。
+完整的训练原理、参数说明与结果评判方法见 **[train.md](train.md)**，这里仅列出快速参考。
 
 `src/train.py` 是 ICFIE-YOLO 三阶段训练的唯一入口，训练参数统一通过 `configs/train.yaml` 管理。
 
@@ -137,7 +214,7 @@ python data-process.py
 | `cls_loss` | 分类损失（cross entropy） |
 | `total_loss` | 三项之和，是优化目标 |
 
-训练结束后用 `src/yolo_test.py` 或 YOLOv7 官方 `test.py` 评估 **mAP@0.5**、**mAP@0.5:0.95** 和 **Recall**。
+训练结束后用 [src/eval.py](src/eval.py) 评估 **mAP@0.5**、**mAP@0.5:0.95** 和 **Recall**。该脚本支持 ICFIE-YOLO 的完整四层推理链路与 `stage_c_epoch_N.pt` 顶层 checkpoint，优先于旧的调试脚本说明。
 
 **关键配置项（`configs/train.yaml`）：**
 
@@ -155,13 +232,14 @@ optimizer:
 	lr: 0.01                 # 阶段 B 学习率；仅训练 MSICN 时可保持较大
   stage_c_lr: 0.0001       # 阶段 C 学习率（全模型微调用较小值）
   min_lr: 0.00001          # CosineAnnealingLR 最低学习率
+  max_grad_norm: 10.0      # 阶段 C 建议保留，用于抑制全量解冻后的梯度爆炸
 schedule:
 	stage_a_epochs: 5        # 阶段 A 轮数；用于建立纯 YOLO baseline
 	stage_b_epochs: 5        # 阶段 B 轮数；当前配置值
 	stage_c_epochs: 5        # 阶段 C 轮数；当前配置值
 ```
 
-当前 `configs/train.yaml` 已按单卡 4060 调整为 `cuda:0 + AMP + grad checkpoint`。
+当前 `configs/train.yaml` 已按单卡 4060 调整为 `cuda:0 + AMP + grad checkpoint + grad clipping`。
 
 ### 训练数据准备
 
@@ -213,6 +291,7 @@ optimizer:
 	stage_a_lr: 0.0001
 	lr: 0.01
 	min_lr: 0.00001
+	max_grad_norm: 10.0
 
 schedule:
 	stage_a_epochs: 1
@@ -227,7 +306,6 @@ schedule:
 4060 或其他单卡环境可直接运行：
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
 
@@ -238,14 +316,12 @@ python src/train.py --config configs/train.yaml
 命令行指定 checkpoint：
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml --resume runs/your_run_dir/stage_c_epoch_2.pt
 ```
 
 自动从当前 `run_dir` 选择最新 checkpoint：
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml --resume
 ```
 
@@ -265,7 +341,6 @@ resume_from: runs/your_run_dir/stage_c_epoch_2.pt
 如果要做正式训练，建议先把 [configs/train.yaml](configs/train.yaml) 中的 `schedule.stage_a_epochs`、`schedule.stage_b_epochs` 和 `schedule.stage_c_epochs` 一并调大，再启动训练：
 
 ```bash
-cd /home/pushk3n/github-ai2
 python src/train.py --config configs/train.yaml
 ```
 
@@ -274,7 +349,6 @@ python src/train.py --config configs/train.yaml
 双 3090 环境可以使用 torchrun：
 
 ```bash
-cd /home/pushk3n/github-ai2
 torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 ```
 
@@ -310,13 +384,14 @@ torchrun --nproc_per_node=2 src/train.py --config configs/train.yaml
 10. normalize_png_before_train: 训练前是否按需清洗带异常元数据的 PNG。
 11. use_ota_loss: 是否启用 YOLOv7 的 OTA loss。
 12. project_after_fusion: 是否对 FIE 输出做 1x1 投影回原始检测头通道。
+13. optimizer.max_grad_norm: 梯度裁剪最大范数；建议正式训练保留默认值 10.0。
 
 说明：
 
 1. dataset.class_names 可选；如果传入，数量必须与 dataset.num_classes 一致。
 2. yolo.num_classes 如果显式写出，必须与 dataset.num_classes 一致。
 3. project_after_fusion 关闭时，前提是你已经同步修改检测头输入通道。
-4. dataset.val_path 字段已预留，后续 eval.py 会复用，但当前 train.py 还没有在训练后自动执行验证。
+4. dataset.val_path 当前已由 [src/eval.py](src/eval.py) 复用，但 `train.py` 仍不会在每个 epoch 结束后自动执行验证。
 5. `normalize_png_before_train=true` 时，训练启动前会扫描训练/验证集中的 PNG，只对包含 `icc_profile/chromaticity/srgb/gamma` 等可疑元数据的文件做重编码，并打印进度，避免 DataLoader 中的 libpng 崩溃。
 
 纯 YOLO / FIE 关闭模式注意事项：
@@ -351,7 +426,7 @@ runs/icfie_yolo/
 1. 已经跑通MSICN模块 (infer.py)
 2. 已经通过mock的方式验证了 MSICN yolo FIE 三模块集成的整体流程 (mock.py) 注意mock.py已经废弃
 3. 增加单图全流程测试 (test.py) 目前可以做到单图全流程测试，但输出的检测结果仍待调试
-4. 增加了 yolo_test.py 用于验证yolo检测头的输入输出，目前可以做到单图检测头测试
+4. 已新增 [src/eval.py](src/eval.py)，支持单图与批量评价，并输出中文 Markdown 报告
 5. 已新增 yolo_wrapper.py，统一封装真实 YOLOv7 backbone_neck 和 detect_head 适配逻辑
 6. 已新增 train.py 和 train_config.py，支持 ICFIE-YOLO 三阶段训练入口
 7. 完成四层解耦重构：推理流水线四层模块分别对应独立文件，icfie_yolo.py 仅负责串联
